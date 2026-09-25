@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <!-- Match MelonLoader 0.7.2's explicit host prerequisite. .NET 6 is out of support. -->
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Version>0.1.0</Version>
+    <Authors>SCPSL-ModLaunch contributors</Authors>
+    <Company>SCPSL-ModLaunch</Company>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>
