@@ -8,6 +8,7 @@ namespace SCPSL.ModLaunch;
 
 internal static class Program
 {
+    private static readonly object LogGate = new();
     private static StreamWriter? logFile;
 
     public static async Task<int> Main(string[] args)
@@ -15,6 +16,9 @@ internal static class Program
         SessionTransaction? transaction = null;
         SessionJournal? journal = null;
         StreamWriter? writer = null;
+        DirectoryLock? directoryLock = null;
+        LauncherUpdater? updater = null;
+        Task? updateCheck = null;
         using var cancellation = new CancellationTokenSource();
         bool gameStarted = false;
         bool finishingInstallation = false;
@@ -27,17 +31,40 @@ internal static class Program
         try
         {
             if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Run the Windows executable directly or through Steam Proton.");
-            LaunchArguments arguments = GameArguments.Parse(args);
             string processPath = Environment.ProcessPath ?? throw new IOException("Cannot locate SCPSL-ModLaunch.exe.");
             // Both the initial drop-in EXE and its permanent private location identify the same game.
-            string root = LauncherInstallation.ResolveGameDirectory(processPath);
-            using var directoryLock = new DirectoryLock(root);
+            string root = LauncherInstallation.ResolveGameDirectory(processPath, requireGameFiles: false);
+            directoryLock = new DirectoryLock(root);
             string cache = FileOps.SafePath(root, ".modlaunch");
             string logPath = FileOps.SafePath(cache, $"logs/{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log");
             Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
             writer = new StreamWriter(logPath) { AutoFlush = true };
-            logFile = writer;
-            Log("SCPSL-ModLaunch — reversible modded session");
+            lock (LogGate) logFile = writer;
+            Version launcherVersion = Assembly.GetExecutingAssembly().GetName().Version!;
+            Log($"SCPSL-ModLaunch {launcherVersion.ToString(launcherVersion.Revision > 0 ? 4 : 3)} — reversible modded session");
+            try { updater = new LauncherUpdater(root, processPath, launcherVersion, Log); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+            {
+                Log("Launcher update check unavailable: " + ex.Message);
+            }
+            // Finish a download left by a terminated launcher before starting another session.
+            if (updater?.TryApplyPending() == true)
+            {
+                string updatedPath = updater.AppliedExecutablePath!;
+                updater.Dispose();
+                updater = null;
+                directoryLock.Dispose();
+                directoryLock = null;
+                var restart = new ProcessStartInfo(updatedPath) { WorkingDirectory = root, UseShellExecute = false };
+                foreach (string argument in args) restart.ArgumentList.Add(argument);
+                using var updated = Process.Start(restart) ?? throw new IOException("Could not start the updated launcher. Run SCPSL-ModLaunch again.");
+                await updated.WaitForExitAsync();
+                return updated.ExitCode;
+            }
+            // Independent of game cancellation: even broken arguments, files or recovery must not skip updates.
+            updateCheck = updater?.CheckAsync();
+            LaunchArguments arguments = GameArguments.Parse(args);
+            _ = LauncherInstallation.ResolveGameDirectory(processPath);
             GameProcessGuard.EnsureStopped(root);
             transaction = new SessionTransaction(root, Log);
             try { journal = transaction.LoadPending(); }
@@ -125,7 +152,22 @@ internal static class Program
             Dialog("SCPSL-ModLaunch", message, true);
             return ex is RestorationException ? 2 : 1;
         }
-        finally { logFile = null; writer?.Dispose(); }
+        finally
+        {
+            try
+            {
+                if (updateCheck != null) await updateCheck;
+                // Runs after both success and failure. Only launcher files are replaced here;
+                // a game's pending recovery journal is preserved for the next invocation.
+                updater?.TryApplyPending();
+            }
+            finally
+            {
+                updater?.Dispose();
+                directoryLock?.Dispose();
+                lock (LogGate) { logFile = null; writer?.Dispose(); }
+            }
+        }
     }
 
     private static void ExtractBundledAdapter(string cache)
@@ -137,10 +179,13 @@ internal static class Program
 
     private static void Log(string message)
     {
-        Console.WriteLine(message);
-        try { logFile?.WriteLine($"{DateTime.UtcNow:O} {message}"); }
-        catch (ObjectDisposedException) { }
-        catch (IOException) { }
+        lock (LogGate)
+        {
+            Console.WriteLine(message);
+            try { logFile?.WriteLine($"{DateTime.UtcNow:O} {message}"); }
+            catch (ObjectDisposedException) { }
+            catch (IOException) { }
+        }
     }
 
     private static void Dialog(string title, string message, bool error)

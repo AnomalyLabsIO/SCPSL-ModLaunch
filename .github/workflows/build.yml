@@ -4,12 +4,15 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
 jobs:
   windows:
+    if: github.event_name != 'release' || !github.event.release.prerelease
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,7 +23,14 @@ jobs:
             8.0.x
       - name: Tests and framework-dependent packages
         shell: pwsh
-        run: ./scripts/package.ps1
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if ($env:RELEASE_TAG) {
+            ./scripts/package.ps1 -ReleaseVersion $env:RELEASE_TAG
+          } else {
+            ./scripts/package.ps1
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: modlaunch-win-x64
@@ -37,3 +47,31 @@ jobs:
             6.0.x
             8.0.x
       - run: dotnet test tests/SCPSL.ModLaunch.Tests/SCPSL.ModLaunch.Tests.csproj -c Release
+
+  release-assets:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: [windows, portable-core-tests]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: modlaunch-win-x64
+          path: release
+      - name: Attach verified packages to the published release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $assets = @(
+            'SCPSL-ModLaunch.exe',
+            'SCPSL-ModLaunch.exe.sha256',
+            'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip',
+            'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip.sha256',
+            'SCPSL-ModLaunch-win-x64.zip',
+            'SCPSL-ModLaunch-win-x64.zip.sha256'
+          ) | ForEach-Object { Join-Path 'release' $_ }
+          gh release upload $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed.' }

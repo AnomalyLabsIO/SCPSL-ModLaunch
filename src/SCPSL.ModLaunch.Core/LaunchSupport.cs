@@ -55,7 +55,12 @@ public static class LoaderConfig
         FileOps.RejectLink(path);
         TomlDocument document = File.Exists(path) ? TomlParser.ParseFile(path) : new TomlParser().Parse("");
         Set(document, "console", "hide_console", TomlBoolean.False);
-        Set(document, "loader", "hostfxr_path_override", new TomlString(runtime.HostFxrPath));
+        // MelonLoader 0.7.3 expands a DLL override back to the runtime root, then loads
+        // the first hostfxr it finds. Limit that scan to the selected .NET 6 version
+        // so older side-by-side hosts cannot trigger a runtime install/download.
+        string hostFxrDirectory = Path.GetDirectoryName(runtime.HostFxrPath)
+            ?? throw new InvalidDataException("The selected hostfxr has no parent directory.");
+        Set(document, "loader", "hostfxr_path_override", new TomlString(hostFxrDirectory));
         FileOps.WriteBytes(path, Encoding.UTF8.GetBytes(document.SerializedValue));
     }
 

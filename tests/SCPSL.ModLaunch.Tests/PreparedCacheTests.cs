@@ -139,7 +139,7 @@ public sealed class PreparedCacheTests
                 Fingerprint = new string('A', 64),
                 GameVersion = "14.2.7",
                 DotnetRoot = Path.Combine(game.Root, "host-dotnet"),
-                MelonLoaderArchive = Path.Combine(CacheDirectory, "downloads", "MelonLoader-0.7.2.x64.zip"),
+                MelonLoaderArchive = Path.Combine(CacheDirectory, "downloads", "MelonLoader-0.7.3.x64.zip"),
                 Inputs = game.Originals.Keys.Select(name => new FileIdentity(name, FileOps.Hash(Path.Combine(game.Root, name)))).ToList()
             };
             Session.PreparedDirectory = Path.Combine(PreparedDirectory, "payloads");

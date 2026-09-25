@@ -69,10 +69,32 @@ public sealed class ConfigurationTests
         Assert.True(config.GetSubTable("other").GetBoolean("hide_console"));
         Assert.Equal("retained", config.GetSubTable("other").GetString("my_value"));
         Assert.Equal("retained too", config.GetSubTable("mono").GetString("search_path"));
-        Assert.Equal(runtime.HostFxrPath, config.GetSubTable("loader").GetString("hostfxr_path_override"));
+        Assert.Equal(Path.GetDirectoryName(runtime.HostFxrPath), config.GetSubTable("loader").GetString("hostfxr_path_override"));
         Assert.Contains("hide_console = false", first);
         Assert.DoesNotContain("hostfxr_path_override = 'old'", first);
         LoaderConfig.Update(path, runtime);
         Assert.Equal(first, File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void LoaderOverrideRestrictsDiscoveryToTheSelectedHostVersion()
+    {
+        using var game = new TestGame();
+        string runtimeRoot = Path.Combine(game.Root, "mixed dotnet installation");
+        HostRuntimeTests.WriteRuntime(runtimeRoot, "2.1.30");
+        HostRuntimeTests.WriteRuntime(runtimeRoot, "6.0.36");
+        var runtime = HostRuntime.ResolveFromRoot(runtimeRoot);
+        string configPath = Path.Combine(game.Root, "UserData", "Loader.cfg");
+
+        LoaderConfig.Update(configPath, runtime);
+
+        string searchDirectory = new TomlParser().Parse(File.ReadAllText(configPath))
+            .GetSubTable("loader").GetString("hostfxr_path_override");
+        Assert.True(Directory.Exists(searchDirectory));
+        // This is the recursive discovery used by MelonLoader 0.7.3. It must not
+        // encounter the incompatible .NET 2.1 host beside the selected runtime.
+        Assert.Equal(runtime.HostFxrPath,
+            Assert.Single(Directory.GetFiles(searchDirectory, "hostfxr.dll", SearchOption.AllDirectories)));
+        Assert.Equal(new Version(6, 0, 36), runtime.Version);
     }
 }

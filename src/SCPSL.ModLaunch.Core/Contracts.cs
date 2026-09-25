@@ -42,6 +42,6 @@ public sealed class PreparedSession
 
 public sealed class ModLaunchSettings
 {
-    public string MelonLoaderVersion { get; set; } = "0.7.2";
+    public string MelonLoaderVersion { get; set; } = "0.7.3";
     public string AdapterRepository { get; set; } = "AnomalyLabsIO/SCPSL-ModLaunch";
 }

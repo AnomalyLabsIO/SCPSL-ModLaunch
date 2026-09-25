@@ -12,7 +12,7 @@ public static class LauncherInstallation
     private const string PrivateDirectory = ".modlaunch";
     private const string OwnershipName = "launcher-installation.json";
 
-    public static string ResolveGameDirectory(string executablePath)
+    public static string ResolveGameDirectory(string executablePath, bool requireGameFiles = true)
     {
         string executable = Path.GetFullPath(executablePath);
         if (!Path.GetFileName(executable).Equals(ExecutableName, StringComparison.OrdinalIgnoreCase))
@@ -25,7 +25,7 @@ public static class LauncherInstallation
         FileOps.RejectLink(directory);
         FileOps.RejectLink(root);
         // A missing retail EXE must not prevent recovery of an interrupted replacement.
-        if (!File.Exists(FileOps.SafePath(root, "SCPSL.exe")) &&
+        if (requireGameFiles && !File.Exists(FileOps.SafePath(root, "SCPSL.exe")) &&
             !File.Exists(FileOps.SafePath(root, PrivateDirectory + "/session.json")))
             throw new InvalidDataException($"Place {ExecutableName} beside SCPSL.exe or in that game's {PrivateDirectory} directory.");
         return root;
@@ -148,6 +148,23 @@ public static class LauncherInstallation
         string journal = FileOps.SafePath(cache, "session.json");
         if (File.Exists(journal) || Directory.Exists(journal))
             throw new IOException("A recovery journal still exists; restore the interrupted game session before relocating the launcher.");
+    }
+
+    // Updating launcher bytes does not change any game files, so this remains usable
+    // when a failed game session needs a newer launcher's recovery code.
+    internal static void RecordExecutableUpdate(string root, string executablePath, string oldHash, string newHash, bool completed)
+    {
+        if (!SamePath(executablePath, FileOps.SafePath(root, ".modlaunch/" + ExecutableName))) return;
+        string path = FileOps.SafePath(root, ".modlaunch/" + OwnershipName);
+        var owner = File.Exists(path) ? FileOps.ReadJson<LauncherInstallationOwnership>(path)
+            : new LauncherInstallationOwnership { ExecutableSha256 = oldHash };
+        ValidateOwnership(owner);
+        if (!MatchesEither(oldHash, owner.ExecutableSha256, owner.PendingExecutableSha256) &&
+            !(completed && MatchesEither(newHash, owner.ExecutableSha256, owner.PendingExecutableSha256)))
+            throw new IOException("The installed launcher ownership changed; its update was not applied.");
+        if (completed) { owner.ExecutableSha256 = newHash; owner.PendingExecutableSha256 = null; }
+        else owner.PendingExecutableSha256 = newHash;
+        FileOps.WriteJson(path, owner);
     }
 
     private static void ValidateOwnership(LauncherInstallationOwnership ownership)

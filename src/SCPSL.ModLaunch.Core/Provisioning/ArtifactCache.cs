@@ -88,7 +88,8 @@ internal sealed class ArtifactCache(HttpClient http, Action<string> log)
         return System.Text.Encoding.UTF8.GetString(memory.ToArray());
     }
 
-    internal async Task<string> DownloadAsync(string url, string destination, string expectedHash, bool sha512, CancellationToken ct)
+    internal async Task<string> DownloadAsync(string url, string destination, string expectedHash, bool sha512, CancellationToken ct,
+        long maximumBytes = 512L * 1024 * 1024)
     {
         if (!IsHash(expectedHash, sha512 ? 128 : 64)) throw new InvalidDataException("The artifact has no valid expected digest.");
         if (Matches(destination, expectedHash, sha512)) return destination;
@@ -101,7 +102,7 @@ internal sealed class ArtifactCache(HttpClient http, Action<string> log)
         {
             using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, budget.Token);
             response.EnsureSuccessStatusCode();
-            if (response.Content.Headers.ContentLength > 512L * 1024 * 1024)
+            if (response.Content.Headers.ContentLength > maximumBytes)
                 throw new InvalidDataException("Download exceeds its size limit.");
             await using (var source = await response.Content.ReadAsStreamAsync(budget.Token))
             await using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous))
@@ -110,7 +111,7 @@ internal sealed class ArtifactCache(HttpClient http, Action<string> log)
                 int count;
                 while ((count = await source.ReadAsync(buffer, budget.Token)) > 0)
                 {
-                    if (output.Length + count > 512L * 1024 * 1024) throw new InvalidDataException("Download exceeds its size limit.");
+                    if (output.Length + count > maximumBytes) throw new InvalidDataException("Download exceeds its size limit.");
                     await output.WriteAsync(buffer.AsMemory(0, count), budget.Token);
                 }
                 output.Flush(flushToDisk: true);

@@ -10,8 +10,8 @@ namespace SCPSL.ModLaunch.Core.Provisioning;
 public sealed class PreparationService
 {
     private const string ModPatchRepository = "hopperlopip/SCPSL-ModPatch";
-    private const string MelonVersion = "0.7.2";
-    private const string MelonHash = "5CEDB66DC5595DE19FD4DD6B4C178440DA293C6D7F511E14BDF0FEA407C9A1F7";
+    private const string MelonVersion = "0.7.3";
+    private const string MelonHash = "5B2B2F3D1CD42B59EC886C5BDC2663EDAE87A0097A4F4A8F58C0965A99DDA416";
     private const string AdapterAsset = "SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip";
     private readonly Action<string> _log;
     private readonly HttpClient _http;
@@ -38,7 +38,7 @@ public sealed class PreparationService
     public async Task<PreparedSession> PrepareAsync(string gameDirectory, string cacheDirectory, ModLaunchSettings settings, CancellationToken ct)
     {
         if (settings.MelonLoaderVersion != MelonVersion)
-            throw new InvalidOperationException("Only MelonLoader 0.7.2 is qualified. A later launcher release must qualify 0.7.3 before it can be selected.");
+            throw new InvalidOperationException($"This launcher build targets MelonLoader {MelonVersion}. Update the melonLoaderVersion setting to match.");
         ValidateRepository(settings.AdapterRepository);
         gameDirectory = Path.GetFullPath(gameDirectory);
         cacheDirectory = Path.GetFullPath(cacheDirectory);
@@ -175,7 +175,7 @@ public sealed class PreparationService
         return session;
     }
 
-    private async Task<string> ResolveAdapterAsync(string cacheDirectory, string repository, CancellationToken ct)
+    internal async Task<string> ResolveAdapterAsync(string cacheDirectory, string repository, CancellationToken ct)
     {
         string? json = null;
         try { json = await _artifacts.GetTextAsync($"https://api.github.com/repos/{repository}/releases/latest", ct); }
@@ -197,6 +197,11 @@ public sealed class PreparationService
             throw new InvalidDataException("The adapter update channel returned an unpublished or prerelease asset.");
         var assets = release.RootElement.GetProperty("assets").EnumerateArray().ToArray();
         var candidates = assets.Where(x => x.GetProperty("name").GetString() == AdapterAsset).ToArray();
+        if (candidates.Length == 0 && FindBundledAdapter(cacheDirectory) is { } fallback)
+        {
+            _log("The latest release has no companion asset; using the packaged adapter.");
+            return fallback;
+        }
         if (candidates.Length != 1) throw new InvalidDataException("The latest adapter release does not contain exactly one expected Windows x64 companion asset.");
         var asset = candidates[0];
         var url = RequiredAssetUrl(asset, repository);

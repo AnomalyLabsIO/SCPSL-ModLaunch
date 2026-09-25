@@ -1,6 +1,6 @@
 # SCPSL-ModLaunch
 
-A lightweight launcher that prepares **SCP: Secret Laboratory** for modded play and restores the original game files when it closes. It applies [SCPSL-ModPatch](https://github.com/hopperlopip/SCPSL-ModPatch) through a headless adapter and installs **MelonLoader 0.7.2**. It uses your installed game and leaves mod selection to you.
+A lightweight launcher that prepares **SCP: Secret Laboratory** for modded play and restores the original game files when it closes. It applies [SCPSL-ModPatch](https://github.com/hopperlopip/SCPSL-ModPatch) through a headless adapter and installs **MelonLoader 0.7.3**. It uses your installed game and leaves mod selection to you.
 
 ## Requirements
 
@@ -56,18 +56,22 @@ Preparation corrects Unity's stored game version in `SCPSL_Data/globalgamemanage
 
 Patch resources are pinned to a recorded upstream revision and validated in staging. Unsupported profiles, missing required patches, or invalid outputs stop activation. Prepared caches depend on input hashes and dependency identities, so changed bytes require fresh preparation even when version labels match.
 
-The launcher checks for companion releases at **AnomalyLabsIO/SCPSL-ModLaunch** and includes a fallback adapter. MelonLoader stays pinned to **0.7.2**. The installed Windows x64 .NET 6 runtime is reused for helpers and MelonLoader.
+The launcher checks for companion releases at **AnomalyLabsIO/SCPSL-ModLaunch** and includes a fallback adapter. MelonLoader stays pinned to **0.7.3**. The installed Windows x64 .NET 6 runtime is reused for helpers and MelonLoader. The loader override points to the selected .NET 6 host directory so its runtime scan cannot pick an older side-by-side host.
+
+SCPSL-ModLaunch also checks its own [GitHub releases](https://github.com/AnomalyLabsIO/SCPSL-ModLaunch/releases) before game preflight. A newer stable launcher is downloaded in the background, checked against its SHA-256 and Windows executable version, and installed during final cleanup for **the next launch**. The check continues if preparation or game startup fails, with a 30-second total network budget. Missing releases, missing assets, network errors, and invalid downloads are logged without blocking the current launcher.
+
+Updates use the standalone `SCPSL-ModLaunch.exe` release asset and its `.sha256` sidecar or GitHub-provided SHA-256 digest. Temporary downloads, update state, and the previous executable stay under `.modlaunch/updates` with neutral `.bin` filenames. An interrupted update is reconciled on the next invocation; if it still needs to replace the EXE, the launcher restarts the updated copy with the same arguments. Shortcut settings and pending game recovery are preserved. Locked or unexpectedly changed files defer replacement.
 
 Configuration lives in `.modlaunch/settings.json`:
 
 ```json
 {
-  "melonLoaderVersion": "0.7.2",
+  "melonLoaderVersion": "0.7.3",
   "adapterRepository": "AnomalyLabsIO/SCPSL-ModLaunch"
 }
 ```
 
-The adapter repository must publish `SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip` plus its `.sha256` sidecar or GitHub-provided SHA-256 digest. That setting selects a source of executable code; use a repository you trust. Publishing a release is a separate maintainer operation.
+The adapter repository publishes `SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip` plus its `.sha256` sidecar or GitHub-provided SHA-256 digest. If a release has no companion asset, the bundled adapter is used. That setting selects a source of executable code; use a repository you trust. Launcher updates always use `AnomalyLabsIO/SCPSL-ModLaunch`.
 
 ## Linux through Proton
 
@@ -96,6 +100,11 @@ The package script runs tests, publishes both tools, embeds the adapter, and wri
 ```text
 artifacts/release/SCPSL-ModLaunch.exe
 artifacts/release/SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip
+artifacts/release/SCPSL-ModLaunch-win-x64.zip
 ```
 
-The build workflow uploads artifacts without creating a public release. `-SkipTests` is available for packaging after tests have passed. See [third-party notices](THIRD_PARTY_NOTICES.md), [validation](docs/VALIDATION.md), and [remaining qualification](docs/NEXT_STEPS.md).
+The full `SCPSL-ModLaunch-win-x64.zip` includes both tools, documentation, and license notices. Self-updates download the separate EXE; the GitHub Actions artifact wrapper is not an updater download format.
+
+Pushes, pull requests, and manual workflow runs build CI artifacts. When a maintainer publishes a stable GitHub release with a numeric tag such as `v0.1.1`, the workflow builds that tag, stamps both tools with its version, and attaches the EXE, both ZIPs, and their checksum sidecars after Windows and portable core tests pass. The workflow does not create releases. Tags must increase for clients to detect a newer launcher. For equivalent local packaging, run `.\scripts\package.ps1 -ReleaseVersion v0.1.1`.
+
+`-SkipTests` is available for packaging after tests have passed. See [third-party notices](THIRD_PARTY_NOTICES.md), [validation](docs/VALIDATION.md), and [remaining qualification](docs/NEXT_STEPS.md).
