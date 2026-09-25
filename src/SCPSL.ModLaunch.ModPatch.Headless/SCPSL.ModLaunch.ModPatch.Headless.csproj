@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SCPSL-ModLaunch.ModPatch.Headless</AssemblyName>
+    <RootNamespace>SCPSL.ModLaunch.ModPatch.Headless</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SCPSL.ModLaunch.Core/SCPSL.ModLaunch.Core.csproj" />
+    <PackageReference Include="Iced" Version="1.21.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <Reference Include="Il2CppDumper"><HintPath>../../vendor/ModPatch/Il2CppDumper.dll</HintPath></Reference>
+    <Reference Include="Mono.Cecil"><HintPath>../../vendor/ModPatch/Mono.Cecil.dll</HintPath></Reference>
+    <InternalsVisibleTo Include="SCPSL.ModLaunch.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="../../vendor/ModPatch/*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../vendor/ModPatch/*.txt" Link="ThirdParty/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../vendor/ModPatch/PROVENANCE.md" Link="ThirdParty/ModPatch-PROVENANCE.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

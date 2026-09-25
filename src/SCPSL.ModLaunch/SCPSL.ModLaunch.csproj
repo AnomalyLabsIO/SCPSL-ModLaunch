@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SCPSL-ModLaunch</AssemblyName>
+    <RootNamespace>SCPSL.ModLaunch</RootNamespace>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SCPSL.ModLaunch.Core/SCPSL.ModLaunch.Core.csproj" />
+    <EmbeddedResource Include="$(AdapterBundlePath)" LogicalName="adapter-bundled.zip" Condition="'$(AdapterBundlePath)' != '' and Exists('$(AdapterBundlePath)')" />
+  </ItemGroup>
+</Project>

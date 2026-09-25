@@ -1,0 +1,156 @@
+using System.Diagnostics;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using SCPSL.ModLaunch.Core;
+using SCPSL.ModLaunch.Core.Provisioning;
+
+namespace SCPSL.ModLaunch;
+
+internal static class Program
+{
+    private static StreamWriter? logFile;
+
+    public static async Task<int> Main(string[] args)
+    {
+        SessionTransaction? transaction = null;
+        SessionJournal? journal = null;
+        StreamWriter? writer = null;
+        using var cancellation = new CancellationTokenSource();
+        bool gameStarted = false;
+        bool finishingInstallation = false;
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            if (gameStarted) Log("Close SCP:SL to finish the session and restore its files.");
+            else cancellation.Cancel();
+        };
+        try
+        {
+            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Run the Windows executable directly or through Steam Proton.");
+            LaunchArguments arguments = GameArguments.Parse(args);
+            string processPath = Environment.ProcessPath ?? throw new IOException("Cannot locate SCPSL-ModLaunch.exe.");
+            // Both the initial drop-in EXE and its permanent private location identify the same game.
+            string root = LauncherInstallation.ResolveGameDirectory(processPath);
+            using var directoryLock = new DirectoryLock(root);
+            string cache = FileOps.SafePath(root, ".modlaunch");
+            string logPath = FileOps.SafePath(cache, $"logs/{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+            writer = new StreamWriter(logPath) { AutoFlush = true };
+            logFile = writer;
+            Log("SCPSL-ModLaunch — reversible modded session");
+            GameProcessGuard.EnsureStopped(root);
+            transaction = new SessionTransaction(root, Log);
+            try { journal = transaction.LoadPending(); }
+            catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or InvalidDataException or UnauthorizedAccessException)
+            {
+                throw new RestorationException(["Recovery journal could not be validated: " + ex.Message]);
+            }
+            if (journal != null)
+            {
+                Log("Recovering the interrupted session before doing anything else.");
+                var recovered = transaction.Restore(journal);
+                if (!recovered.Success) throw new RestorationException(recovered.Failures);
+                journal = null;
+                RuntimeInstallation.CaptureGeneratedFiles(root, Log);
+                CacheMaintenance.BeforePreparation(root, Log);
+                finishingInstallation = true;
+                LauncherInstallation.Complete(root, processPath, Log);
+                finishingInstallation = false;
+                Dialog("SCPSL-ModLaunch recovery", "Original game files restored. You can now launch vanilla, or run SCPSL-ModLaunch again for a modded session.", false);
+                return 0;
+            }
+            RuntimeInstallation.Preflight(root);
+            CacheMaintenance.BeforePreparation(root, Log);
+            if (arguments.RecoverOnly)
+            {
+                Log("No unfinished session exists; loader entry points are inactive.");
+                finishingInstallation = true;
+                LauncherInstallation.Complete(root, processPath, Log);
+                finishingInstallation = false;
+                return 0;
+            }
+            string settingsPath = FileOps.SafePath(cache, "settings.json");
+            ModLaunchSettings settings = File.Exists(settingsPath) ? FileOps.ReadJson<ModLaunchSettings>(settingsPath) : new ModLaunchSettings();
+            if (!File.Exists(settingsPath)) FileOps.WriteJson(settingsPath, settings);
+            ExtractBundledAdapter(cache);
+            var preparation = new PreparationService(Log);
+            PreparedSession prepared = await preparation.PrepareAsync(root, cache, settings, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            GameProcessGuard.EnsureStopped(root);
+            RuntimeInstallation.Preflight(root);
+            RuntimeInstallation.InstallPersistentFiles(root, prepared, Log);
+            CacheMaintenance.AfterSuccessfulPreparation(root, prepared, Log);
+            LoaderConfig.Update(FileOps.SafePath(root, "UserData/Loader.cfg"), prepared.DotnetRoot);
+            Log("Backing up original files and activating the modded session...");
+            journal = transaction.Create(prepared);
+            try
+            {
+                transaction.Activate(journal);
+                cancellation.Token.ThrowIfCancellationRequested();
+                using var game = new Process { StartInfo = GameArguments.StartInfo(root, prepared.DotnetRoot, arguments.GameArguments) };
+                if (!game.Start()) throw new IOException("SCP:SL could not be started.");
+                gameStarted = true;
+                // If recording the PID fails, we still must wait before touching the running game's files.
+                try { transaction.RecordGameProcess(journal, game); }
+                catch (Exception ex) { Log("Could not record game PID; waiting for exit before recovery: " + ex.Message); }
+                Log("SCP:SL is running. Close the game normally to restore vanilla files.");
+                await game.WaitForExitAsync(CancellationToken.None);
+                Log($"SCP:SL exited with code {game.ExitCode}.");
+                gameStarted = false;
+            }
+            finally
+            {
+                GameProcessGuard.EnsureStopped(root);
+                RestoreResult restored = transaction.Restore(journal);
+                if (!restored.Success) throw new RestorationException(restored.Failures);
+                journal = null;
+                RuntimeInstallation.CaptureGeneratedFiles(root, Log);
+                CacheMaintenance.CleanCompletedSessions(root, Log);
+            }
+            finishingInstallation = true;
+            LauncherInstallation.Complete(root, processPath, Log);
+            finishingInstallation = false;
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            string message = ex is OperationCanceledException ? "Preparation cancelled." : ex.Message;
+            if (journal != null && ex is not RestorationException)
+                message += "\n\nAn unfinished session remains. Close SCP:SL and rerun SCPSL-ModLaunch to recover before launching vanilla.";
+            if (ex is RestorationException)
+                message += "\n\nVerify SCP:SL files in Steam: Properties > Installed Files > Verify integrity. Rerun SCPSL-ModLaunch for recovery. Steam verification may not remove an extra version.dll; do not launch vanilla while that loader entry point remains. Backups and the recovery journal have been retained.";
+            if (finishingInstallation)
+                message += "\n\nThe game files are restored, but launcher relocation or shortcut setup is incomplete. A remaining SCPSL-ModLaunch.exe in the game root can block vanilla startup. Resolve the reported problem, then run the available launcher with --modlaunch-recover-only to finish setup.";
+            Log(message);
+            Dialog("SCPSL-ModLaunch", message, true);
+            return ex is RestorationException ? 2 : 1;
+        }
+        finally { logFile = null; writer?.Dispose(); }
+    }
+
+    private static void ExtractBundledAdapter(string cache)
+    {
+        using Stream? resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("adapter-bundled.zip");
+        if (resource == null) return;
+        BundledAdapterInstallation.Install(cache, resource);
+    }
+
+    private static void Log(string message)
+    {
+        Console.WriteLine(message);
+        try { logFile?.WriteLine($"{DateTime.UtcNow:O} {message}"); }
+        catch (ObjectDisposedException) { }
+        catch (IOException) { }
+    }
+
+    private static void Dialog(string title, string message, bool error)
+    {
+        if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("MODLAUNCH_NO_DIALOG") != "1")
+            _ = MessageBoxW(IntPtr.Zero, message, title, error ? 0x10u : 0x40u);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int MessageBoxW(IntPtr parent, string text, string caption, uint type);
+
+    private sealed class RestorationException(IEnumerable<string> failures) : IOException("Some game files could not be restored:\n" + string.Join("\n", failures));
+}

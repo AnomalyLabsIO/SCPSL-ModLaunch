@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Samboy063.Tomlet" Version="5.0.1" />
+    <InternalsVisibleTo Include="SCPSL.ModLaunch.Tests" />
+  </ItemGroup>
+</Project>
