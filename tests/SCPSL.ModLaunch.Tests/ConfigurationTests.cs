@@ -12,6 +12,9 @@ public sealed class ConfigurationTests
         string[] expected = ["-noauth", "--name", "a b", "", "literal\"quote", @"C:\a directory\", "--melonloader.hideconsole"];
         var result = GameArguments.Parse(expected);
         Assert.False(result.RecoverOnly);
+        Assert.False(result.NoRestore);
+        Assert.False(result.NoMelonLoader);
+        Assert.False(result.NoStart);
         Assert.Equal(expected, result.GameArguments);
     }
 
@@ -19,6 +22,32 @@ public sealed class ConfigurationTests
     public void NoImplicitGameArgumentsAreAdded()
     {
         Assert.Empty(GameArguments.Parse([]).GameArguments);
+    }
+
+    [Theory]
+    [InlineData("--modlaunch-no-restore", true, false, false)]
+    [InlineData("--modlaunch-no-melonloader", false, true, false)]
+    [InlineData("--modlaunch-no-start", false, false, true)]
+    public void LauncherOptionsAreConsumed(string option, bool noRestore, bool noMelonLoader, bool noStart)
+    {
+        var result = GameArguments.Parse([option]);
+        Assert.False(result.RecoverOnly);
+        Assert.Equal(noRestore, result.NoRestore);
+        Assert.Equal(noMelonLoader, result.NoMelonLoader);
+        Assert.Equal(noStart, result.NoStart);
+        Assert.Empty(result.GameArguments);
+    }
+
+    [Fact]
+    public void CombinedLauncherOptionsPreserveRemainingGameArgumentsAndDuplicates()
+    {
+        var result = GameArguments.Parse(["-noauth", "--modlaunch-no-start", "", "--name", "two words",
+            "--modlaunch-no-melonloader", "--", "--modlaunch-no-restore", "-noauth", "--modlaunch-no-start"]);
+        Assert.False(result.RecoverOnly);
+        Assert.True(result.NoRestore);
+        Assert.True(result.NoMelonLoader);
+        Assert.True(result.NoStart);
+        Assert.Equal(new[] { "-noauth", "", "--name", "two words", "--", "-noauth" }, result.GameArguments);
     }
 
     [Fact]
@@ -40,10 +69,26 @@ public sealed class ConfigurationTests
     }
 
     [Fact]
-    public void RecoverOnlyFlagCannotSilentlyDiscardGameArguments()
+    public void RecoverOnlyIsRecognizedAndNotForwarded()
     {
-        Assert.True(GameArguments.Parse(["--modlaunch-recover-only"]).RecoverOnly);
-        Assert.ThrowsAny<Exception>(() => GameArguments.Parse(["--modlaunch-recover-only", "-noauth"]));
+        var result = GameArguments.Parse(["--modlaunch-recover-only"]);
+        Assert.True(result.RecoverOnly);
+        Assert.False(result.NoRestore);
+        Assert.False(result.NoMelonLoader);
+        Assert.False(result.NoStart);
+        Assert.Empty(result.GameArguments);
+    }
+
+    [Theory]
+    [InlineData("-noauth")]
+    [InlineData("")]
+    [InlineData("--modlaunch-no-restore")]
+    [InlineData("--modlaunch-no-melonloader")]
+    [InlineData("--modlaunch-no-start")]
+    public void RecoverOnlyRejectsGameArgumentsAndOtherLauncherOptions(string argument)
+    {
+        Assert.Throws<ArgumentException>(() => GameArguments.Parse(["--modlaunch-recover-only", argument]));
+        Assert.Throws<ArgumentException>(() => GameArguments.Parse([argument, "--modlaunch-recover-only"]));
     }
 
     [Fact]

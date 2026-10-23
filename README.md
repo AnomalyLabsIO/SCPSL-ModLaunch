@@ -1,6 +1,6 @@
 # SCPSL-ModLaunch
 
-A lightweight launcher that prepares **SCP: Secret Laboratory** for modded play and restores the original game files when it closes. It runs the CLI from [our SCPSL-ModPatch fork](https://github.com/AnomalyLabsIO/SCPSL-ModPatch), using its pattern manifest, and installs **MelonLoader 0.7.3**. It uses your installed game and leaves mod selection to you.
+A lightweight launcher that prepares **SCP: Secret Laboratory** for modded play and restores the original game files when it closes by default. It runs the CLI from [our SCPSL-ModPatch fork](https://github.com/AnomalyLabsIO/SCPSL-ModPatch), using its pattern manifest, and installs **MelonLoader 0.7.3**. It uses your installed game and leaves mod selection to you.
 
 *Based on [SCPSL-ModPatch by hopperlopip / LostFire](https://github.com/hopperlopip/SCPSL-ModPatch). Not affiliated with MelonLoader or Northwood Studios.*
 
@@ -24,6 +24,28 @@ The launcher will leave a shortcut in the game directory named **SCPSL-ModLaunch
 
 >You can also add SCPSL-ModLaunch to Steam as a non-Steam game and set the target to `.modlaunch/SCPSL-ModLaunch.exe` with the game directory as its Start In directory.
 
+## Launch arguments
+
+Game arguments are passed through in their original order. The following reserved launcher arguments are consumed by ModLaunch:
+
+| Argument | Effect |
+| --- | --- |
+| `--modlaunch-no-restore` | Leave the modded files active after the game closes. If a fully active session is already present, reuse it and start the game. Backups and recovery information are retained. |
+| `--modlaunch-no-melonloader` | Skip downloading, installing, configuring, and generating assemblies for MelonLoader. The game files are still patched. |
+| `--modlaunch-no-start` | Prepare and activate the modded files, then exit without starting the game. Leaves the files active even without `--modlaunch-no-restore`. |
+| `--modlaunch-recover-only` | Restore a pending session and exit. Cannot be combined with other launcher options or game arguments. |
+
+The three `--modlaunch-no-*` options can be combined. For example, prepare without launching, then reuse those files for modded sessions:
+
+```powershell
+.\.modlaunch\SCPSL-ModLaunch.exe --modlaunch-no-start
+.\.modlaunch\SCPSL-ModLaunch.exe --modlaunch-no-restore
+```
+
+When modded files have been left active, running without `--modlaunch-no-restore` restores vanilla files and exits. Run again to start a fresh modded session. Game arguments supplied with `--modlaunch-no-start` are accepted but no game is started.
+
+On a first run with `--modlaunch-no-start` or `--modlaunch-no-restore`, keep using the EXE in the game directory until you restore the session. Launcher relocation and shortcut creation happen after restoration. `--modlaunch-no-melonloader` leaves existing dormant MelonLoader files untouched; conflicting loader entry points such as `version.dll` are still refused.
+
 ## Native bootstrap
 
 SCP:SL modded sessions use the bundled Windows x64 bootstrap built from stock MelonLoader 0.7.3 with upstream Dobby PR 13. The managed MelonLoader, support module and Il2CppInterop files remain stock. The standard launcher and shortcut select this bootstrap automatically; a separate fixed-backend script is unnecessary. The official MelonLoader archive remains unchanged, and persisted preparations continue to identify its stock bootstrap. See [native bootstrap qualification](docs/NATIVE_BOOTSTRAP_PR13_QUALIFICATION.md).
@@ -36,7 +58,7 @@ SCPSL-ModLaunch prepares MelonLoader 0.7.3 on its first run. You can add Melon M
 
 ## Recovery
 
-Do not start vanilla during an active or interrupted modded session. After forced termination or power loss, run SCPSL-ModLaunch again: it restores the pending session and exits. Run it once more to start modded play.
+Do not start vanilla during an active or interrupted modded session, including after using `--modlaunch-no-restore` or `--modlaunch-no-start`. After forced termination or power loss, run SCPSL-ModLaunch again without those options: it restores the pending session and exits. Run it once more to start modded play.
 
 To restore without launching, use the reserved argument:
 
@@ -58,7 +80,7 @@ Launcher logs in `.modlaunch/logs/` include individual startup phase timings, in
 
 ## Removing the launcher
 
-If you need to remove the launcher from the game directory, make sure the game is not running, then delete the following files and folders:
+If you need to remove the launcher from the game directory, make sure the game is not running and restore any pending session with `--modlaunch-recover-only`, then delete the following files and folders:
 ```
 .modlaunch\
 MelonLoader\
@@ -75,9 +97,9 @@ SCPSL-ModLaunch.lnk
 - ### Q. Can I update the game with Steam while using SCPSL-ModLaunch? 
   - A. Yes, though some of your mods may need to be updated to be compatible.
 - ### Q. Can I Verify the integrity of the game files with Steam while using SCPSL-ModLaunch?
-  - A. Yes, SCPSL-ModLaunch does not leave any modified game files after it exits and will update its internal modded files if the  verification changes the original game files.
+  - A. Yes, after restoring any active modded session. SCPSL-ModLaunch restores modified game files on exit by default and will update its internal modded files if verification changes the original game files.
 - ### Q. Can I run SCPSL.exe vanilla safely while leaving the modded files in the game directory?
-  - A. *At the moment, Yes*. ModLaunch restores original game files and deactivates MelonLoader's injection files so nothing attempts to run in vanilla play, and anti-cheat doesn't alert on them.
+  - A. *At the moment, Yes*, after the active session has been restored. ModLaunch restores original game files and deactivates MelonLoader's injection files by default so nothing attempts to run in vanilla play, and anti-cheat doesn't alert on them. Restore first if you used `--modlaunch-no-restore` or `--modlaunch-no-start`.
   I cannot guarantee this will always be the case, so if you want to be safe, use a separate copy of the game for modded play.
 
 

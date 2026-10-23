@@ -23,11 +23,12 @@ internal static class Program
         var startup = Stopwatch.StartNew();
         using var cancellation = new CancellationTokenSource();
         bool gameStarted = false;
+        bool restoreAfterGame = true;
         bool finishingInstallation = false;
         Console.CancelKeyPress += (_, e) =>
         {
             e.Cancel = true;
-            if (gameStarted) Log("Close SCP:SL to finish the session and restore its files.");
+            if (gameStarted) Log(restoreAfterGame ? "Close SCP:SL to finish the session and restore its files." : "Close SCP:SL to finish the session; modded files will remain active.");
             else cancellation.Cancel();
         };
         try
@@ -66,6 +67,7 @@ internal static class Program
             // Independent of game cancellation: even broken arguments, files or recovery must not skip updates.
             updateCheck = updater?.CheckAsync();
             LaunchArguments arguments = GameArguments.Parse(args);
+            restoreAfterGame = !arguments.NoRestore;
             _ = LauncherInstallation.ResolveGameDirectory(processPath);
             GameProcessGuard.EnsureStopped(root);
             using (StartupPhase.Start(Log, "metadata cache load")) verification = new FileVerificationCache(root, Log);
@@ -75,9 +77,26 @@ internal static class Program
             {
                 throw new RestorationException(["Recovery journal could not be validated: " + ex.Message]);
             }
-            if (journal != null)
+            bool reuseActiveSession = false;
+            string? dotnetRoot = null;
+            if (journal != null && arguments.NoRestore)
             {
-                Log("Recovering the interrupted session before doing anything else.");
+                try
+                {
+                    using (StartupPhase.Start(Log, "active session verification")) transaction.VerifyActive(journal);
+                    dotnetRoot = string.IsNullOrWhiteSpace(journal.DotnetRoot)
+                        ? HostRuntime.Resolve().DotnetRoot : HostRuntime.ResolveFromRoot(journal.DotnetRoot).DotnetRoot;
+                    reuseActiveSession = true;
+                    Log("Reusing the active modded files and retained vanilla backups.");
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+                {
+                    Log("The pending session cannot be reused; restoring it first: " + ex.Message);
+                }
+            }
+            if (journal != null && !reuseActiveSession)
+            {
+                Log("Restoring the pending session before doing anything else.");
                 RestoreResult recovered;
                 using (StartupPhase.Start(Log, "interrupted session restoration")) recovered = transaction.Restore(journal);
                 if (!recovered.Success) throw new RestorationException(recovered.Failures);
@@ -91,68 +110,97 @@ internal static class Program
                 Dialog("SCPSL-ModLaunch recovery", "Original game files restored. You can now launch vanilla, or run SCPSL-ModLaunch again for a modded session.", false);
                 return 0;
             }
-            using (StartupPhase.Start(Log, "preflight and cache maintenance"))
+            if (!reuseActiveSession)
             {
-                RuntimeInstallation.Preflight(root);
-                CacheMaintenance.BeforePreparation(root, Log);
+                using (StartupPhase.Start(Log, "preflight and cache maintenance"))
+                {
+                    RuntimeInstallation.Preflight(root, arguments.NoMelonLoader);
+                    CacheMaintenance.BeforePreparation(root, Log);
+                }
+                if (arguments.RecoverOnly)
+                {
+                    Log("No unfinished session exists; loader entry points are inactive.");
+                    finishingInstallation = true;
+                    LauncherInstallation.Complete(root, processPath, Log);
+                    finishingInstallation = false;
+                    return 0;
+                }
+                string settingsPath = FileOps.SafePath(cache, "settings.json");
+                ModLaunchSettings settings = File.Exists(settingsPath) ? FileOps.ReadJson<ModLaunchSettings>(settingsPath) : new ModLaunchSettings();
+                if (!File.Exists(settingsPath)) FileOps.WriteJson(settingsPath, settings);
+                using (StartupPhase.Start(Log, "bundled adapter verification")) ExtractBundledAdapter(cache, verification);
+                var preparation = new PreparationService(Log);
+                PreparedSession prepared;
+                using (StartupPhase.Start(Log, "preparation total"))
+                    prepared = await preparation.PrepareAsync(root, cache, settings, cancellation.Token, verification, arguments.NoMelonLoader);
+                cancellation.Token.ThrowIfCancellationRequested();
+                GameProcessGuard.EnsureStopped(root);
+                RuntimeInstallation.Preflight(root, arguments.NoMelonLoader);
+                if (!prepared.SkipMelonLoader)
+                {
+                    using (StartupPhase.Start(Log, "installed runtime validation"))
+                        RuntimeInstallation.InstallPersistentFiles(root, prepared, Log, verification);
+                }
+                using (StartupPhase.Start(Log, "successful preparation maintenance")) CacheMaintenance.AfterSuccessfulPreparation(root, prepared, Log);
+                if (!prepared.SkipMelonLoader)
+                {
+                    using (StartupPhase.Start(Log, "bundled native bootstrap selection")) SelectBundledNativeBootstrap(cache, prepared);
+                    LoaderConfig.Update(FileOps.SafePath(root, "UserData/Loader.cfg"), prepared.DotnetRoot);
+                }
+                dotnetRoot = prepared.DotnetRoot;
+                Log("Backing up original files and activating the modded session...");
+                using (StartupPhase.Start(Log, "original verification and backups")) journal = transaction.Create(prepared);
+                using (StartupPhase.Start(Log, "verification metadata persistence")) verification.Save();
             }
-            if (arguments.RecoverOnly)
-            {
-                Log("No unfinished session exists; loader entry points are inactive.");
-                finishingInstallation = true;
-                LauncherInstallation.Complete(root, processPath, Log);
-                finishingInstallation = false;
-                return 0;
-            }
-            string settingsPath = FileOps.SafePath(cache, "settings.json");
-            ModLaunchSettings settings = File.Exists(settingsPath) ? FileOps.ReadJson<ModLaunchSettings>(settingsPath) : new ModLaunchSettings();
-            if (!File.Exists(settingsPath)) FileOps.WriteJson(settingsPath, settings);
-            using (StartupPhase.Start(Log, "bundled adapter verification")) ExtractBundledAdapter(cache, verification);
-            var preparation = new PreparationService(Log);
-            PreparedSession prepared;
-            using (StartupPhase.Start(Log, "preparation total"))
-                prepared = await preparation.PrepareAsync(root, cache, settings, cancellation.Token, verification);
-            cancellation.Token.ThrowIfCancellationRequested();
-            GameProcessGuard.EnsureStopped(root);
-            RuntimeInstallation.Preflight(root);
-            using (StartupPhase.Start(Log, "installed runtime validation"))
-                RuntimeInstallation.InstallPersistentFiles(root, prepared, Log, verification);
-            using (StartupPhase.Start(Log, "successful preparation maintenance")) CacheMaintenance.AfterSuccessfulPreparation(root, prepared, Log);
-            using (StartupPhase.Start(Log, "bundled native bootstrap selection")) SelectBundledNativeBootstrap(cache, prepared);
-            LoaderConfig.Update(FileOps.SafePath(root, "UserData/Loader.cfg"), prepared.DotnetRoot);
-            Log("Backing up original files and activating the modded session...");
-            using (StartupPhase.Start(Log, "original verification and backups")) journal = transaction.Create(prepared);
-            using (StartupPhase.Start(Log, "verification metadata persistence")) verification.Save();
+            SessionJournal activeJournal = journal ?? throw new InvalidOperationException("The modded session journal is missing.");
+            bool retainFiles = false;
             try
             {
-                using (StartupPhase.Start(Log, "session activation")) transaction.Activate(journal);
+                if (!reuseActiveSession)
+                    using (StartupPhase.Start(Log, "session activation")) transaction.Activate(activeJournal);
                 verification.LogSummary();
                 cancellation.Token.ThrowIfCancellationRequested();
-                using var game = new Process { StartInfo = GameArguments.StartInfo(root, prepared.DotnetRoot, arguments.GameArguments) };
+                if (arguments.NoStart)
+                {
+                    retainFiles = true;
+                    Log("Modded files are ready. SCP:SL was not started.");
+                    return 0;
+                }
+                using var game = new Process { StartInfo = GameArguments.StartInfo(root, dotnetRoot!, arguments.GameArguments) };
                 using (StartupPhase.Start(Log, "SCP:SL process creation"))
                     if (!game.Start()) throw new IOException("SCP:SL could not be started.");
                 gameStarted = true;
                 startup.Stop();
                 Log($"Startup total to SCP:SL process start: {startup.Elapsed.TotalMilliseconds:F1} ms.");
                 // If recording the PID fails, we still must wait before touching the running game's files.
-                try { transaction.RecordGameProcess(journal, game); }
+                try { transaction.RecordGameProcess(activeJournal, game); }
                 catch (Exception ex) { Log("Could not record game PID; waiting for exit before recovery: " + ex.Message); }
-                Log("SCP:SL is running. Close the game normally to restore vanilla files.");
+                Log(arguments.NoRestore ? "SCP:SL is running. Modded files will remain active after it closes." : "SCP:SL is running. Close the game normally to restore vanilla files.");
                 await game.WaitForExitAsync(CancellationToken.None);
                 Log($"SCP:SL exited with code {game.ExitCode}.");
                 gameStarted = false;
+                retainFiles = arguments.NoRestore;
             }
             finally
             {
                 GameProcessGuard.EnsureStopped(root);
-                RestoreResult restored;
-                using (StartupPhase.Start(Log, "session restoration")) restored = transaction.Restore(journal);
-                if (!restored.Success) throw new RestorationException(restored.Failures);
-                journal = null;
-                using (StartupPhase.Start(Log, "generated file capture")) RuntimeInstallation.CaptureGeneratedFiles(root, Log, verification);
-                verification.Save();
-                CacheMaintenance.CleanCompletedSessions(root, Log);
+                if (retainFiles)
+                {
+                    verification.Save();
+                    Log("Modded files remain active; vanilla backups and the recovery journal have been retained. Run without --modlaunch-no-restore to restore vanilla and exit.");
+                }
+                else
+                {
+                    RestoreResult restored;
+                    using (StartupPhase.Start(Log, "session restoration")) restored = transaction.Restore(activeJournal);
+                    if (!restored.Success) throw new RestorationException(restored.Failures);
+                    journal = null;
+                    using (StartupPhase.Start(Log, "generated file capture")) RuntimeInstallation.CaptureGeneratedFiles(root, Log, verification);
+                    verification.Save();
+                    CacheMaintenance.CleanCompletedSessions(root, Log);
+                }
             }
+            if (retainFiles) return 0;
             finishingInstallation = true;
             LauncherInstallation.Complete(root, processPath, Log);
             finishingInstallation = false;

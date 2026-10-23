@@ -36,9 +36,9 @@ public sealed class PreparationService
     }
 
     public async Task<PreparedSession> PrepareAsync(string gameDirectory, string cacheDirectory, ModLaunchSettings settings, CancellationToken ct,
-        FileVerificationCache? verification = null)
+        FileVerificationCache? verification = null, bool skipMelonLoader = false)
     {
-        if (settings.MelonLoaderVersion != MelonVersion)
+        if (!skipMelonLoader && settings.MelonLoaderVersion != MelonVersion)
             throw new InvalidOperationException($"This launcher build targets MelonLoader {MelonVersion}. Update the melonLoaderVersion setting to match.");
         ValidateRepository(settings.AdapterRepository);
         gameDirectory = Path.GetFullPath(gameDirectory);
@@ -60,7 +60,13 @@ public sealed class PreparationService
         try
         {
             using (StartupPhase.Start(_log, "adapter resolution"))
-                adapter = await ResolveAdapterAsync(cacheDirectory, settings.AdapterRepository, ct);
+            {
+                // Published adapters can predate the option which suppresses interop generation.
+                // The packaged adapter and this launcher always support the same preparation modes.
+                adapter = skipMelonLoader
+                    ? FindBundledAdapter(cacheDirectory) ?? throw new InvalidDataException("Patch-only preparation requires the packaged headless adapter. Use a complete SCPSL-ModLaunch release package.")
+                    : await ResolveAdapterAsync(cacheDirectory, settings.AdapterRepository, ct);
+            }
             resources = await ResolvePatchResourcesAsync(cacheDirectory, adapter, ct);
         }
         catch (Exception ex) when (IsUnavailable(ex, ct))
@@ -68,7 +74,7 @@ public sealed class PreparationService
             _log($"Update check is unavailable: {ex.Message}");
             PreparedSession? offline;
             using (StartupPhase.Start(_log, "offline prepared-session validation"))
-                offline = FindOfflineSession(cacheDirectory, inputKey, settings, verification);
+                offline = FindOfflineSession(cacheDirectory, inputKey, settings, verification, skipMelonLoader: skipMelonLoader);
             if (offline is null)
                 throw new IOException("The update service is unavailable and no complete, validated preparation exists for these exact game files. Connect to the internet and retry.", ex);
             offline.DotnetRoot = hostRuntime.DotnetRoot;
@@ -82,7 +88,7 @@ public sealed class PreparationService
         {
             // An outage must not switch an already prepared session from a newer
             // remote resource revision back to the bundled revision and regenerate it.
-            var offline = FindOfflineSession(cacheDirectory, inputKey, settings, verification, adapterHash);
+            var offline = FindOfflineSession(cacheDirectory, inputKey, settings, verification, adapterHash, skipMelonLoader);
             if (offline is not null)
             {
                 offline.DotnetRoot = hostRuntime.DotnetRoot;
@@ -90,7 +96,8 @@ public sealed class PreparationService
                 return offline;
             }
         }
-        var fingerprint = ComputeHash($"layout-3-patterns-v1\n{inputKey}\n{resources.Revision}\n{resources.Sha256}\n{adapterHash}\n{settings.MelonLoaderVersion}");
+        var fingerprint = ComputeHash($"layout-3-patterns-v1\n{inputKey}\n{resources.Revision}\n{resources.Sha256}\n{adapterHash}\n{(skipMelonLoader ? MelonVersion : settings.MelonLoaderVersion)}" +
+            (skipMelonLoader ? "\nskip-melonloader" : ""));
         var preparedDirectory = ArtifactCache.SafePath(cacheDirectory, CacheLayout.ModdedFiles);
         var manifestPath = Path.Combine(preparedDirectory, CacheLayout.PreparationManifest);
         using (StartupPhase.Start(_log, "prepared-session validation"))
@@ -104,6 +111,7 @@ public sealed class PreparationService
                         var manifest = ReadManifest(manifestPath);
                         manifest.Session.DotnetRoot = hostRuntime.DotnetRoot;
                         if (manifest.InputKey == inputKey && manifest.AdapterRepository == settings.AdapterRepository &&
+                            manifest.Session.SkipMelonLoader == skipMelonLoader &&
                             manifest.Session.Fingerprint == fingerprint && ValidateSession(manifest.Session, preparedDirectory, cacheDirectory, inputKey,
                                 verification: verification))
                         {
@@ -123,24 +131,28 @@ public sealed class PreparationService
 
         CheckFreeSpace(cacheDirectory, gameDirectory, inputs);
         var dotnetRoot = hostRuntime.DotnetRoot;
-        string melonZip;
-        using (StartupPhase.Start(_log, "MelonLoader archive acquisition"))
-            melonZip = await _artifacts.DownloadAsync(
-                $"https://github.com/LavaGang/MelonLoader/releases/download/v{MelonVersion}/MelonLoader.x64.zip",
-                ArtifactCache.SafePath(cacheDirectory, $"downloads/MelonLoader-{MelonVersion}.x64.zip"), MelonHash, false, ct);
+        string melonZip = "";
+        if (!skipMelonLoader)
+            using (StartupPhase.Start(_log, "MelonLoader archive acquisition"))
+                melonZip = await _artifacts.DownloadAsync(
+                    $"https://github.com/LavaGang/MelonLoader/releases/download/v{MelonVersion}/MelonLoader.x64.zip",
+                    ArtifactCache.SafePath(cacheDirectory, $"downloads/MelonLoader-{MelonVersion}.x64.zip"), MelonHash, false, ct);
         var work = ArtifactCache.SafePath(cacheDirectory, $"{CacheLayout.Temporary}/preparation-{DateTime.UtcNow:yyyy-MM-dd_HH-mm-ss}-{Guid.NewGuid().ToString("N")[..8]}");
         var stage = Path.Combine(work, "game");
         Directory.CreateDirectory(stage);
-        string bootstrapHash;
-        using (StartupPhase.Start(_log, "MelonLoader runtime extraction"))
+        string bootstrapHash = "";
+        if (!skipMelonLoader)
         {
-            bootstrapHash = ArtifactCache.ExtractMelonRuntime(melonZip, stage);
-            RequireMelonLayout(stage);
+            using (StartupPhase.Start(_log, "MelonLoader runtime extraction"))
+            {
+                bootstrapHash = ArtifactCache.ExtractMelonRuntime(melonZip, stage);
+                RequireMelonLayout(stage);
+            }
+            const string generatorConfig = "MelonLoader/Dependencies/Il2CppAssemblyGenerator/Config.cfg";
+            string existingGeneratorConfig = ArtifactCache.SafePath(gameDirectory, generatorConfig);
+            if (File.Exists(existingGeneratorConfig))
+                FileOps.CopyVerified(existingGeneratorConfig, ArtifactCache.SafePath(stage, generatorConfig), ArtifactCache.Hash(existingGeneratorConfig));
         }
-        const string generatorConfig = "MelonLoader/Dependencies/Il2CppAssemblyGenerator/Config.cfg";
-        string existingGeneratorConfig = ArtifactCache.SafePath(gameDirectory, generatorConfig);
-        if (File.Exists(existingGeneratorConfig))
-            FileOps.CopyVerified(existingGeneratorConfig, ArtifactCache.SafePath(stage, generatorConfig), ArtifactCache.Hash(existingGeneratorConfig));
         _log("Creating staged copies of the game files...");
         using (StartupPhase.Start(_log, "verified game staging"))
         {
@@ -151,11 +163,16 @@ public sealed class PreparationService
             }
         }
         var reportPath = Path.Combine(work, CacheLayout.PatchResults);
+        var adapterArguments = new List<string>
+        {
+            "prepare", "--game-dir", stage, "--patch-info", resources.Path, "--result", reportPath,
+            "--patch-revision", resources.Revision, "--cache-dir", ArtifactCache.SafePath(cacheDirectory, "downloads")
+        };
+        if (skipMelonLoader) adapterArguments.AddRange(["--skip-melonloader", "true"]);
         _log("Running the headless ModPatch adapter against staged copies...");
         using (StartupPhase.Start(_log, "headless patch preparation"))
             await ToolRunner.RunAsync(adapter,
-                ["prepare", "--game-dir", stage, "--patch-info", resources.Path, "--result", reportPath,
-                 "--patch-revision", resources.Revision, "--cache-dir", ArtifactCache.SafePath(cacheDirectory, "downloads")],
+                adapterArguments,
                 work, dotnetRoot, line => _log("ModPatch: " + line), TimeSpan.FromMinutes(30), ct);
         PatchResult report;
         using (StartupPhase.Start(_log, "staged output verification"))
@@ -169,18 +186,21 @@ public sealed class PreparationService
         }
 
         var runtimeFiles = new List<PreparedFile>();
-        using (StartupPhase.Start(_log, "persistent runtime installation"))
+        if (!skipMelonLoader)
         {
-            foreach (var path in Directory.EnumerateFiles(Path.Combine(stage, "MelonLoader"), "*", SearchOption.AllDirectories))
+            using (StartupPhase.Start(_log, "persistent runtime installation"))
             {
-                var relative = Relative(stage, path);
-                if (IsGenerationScratch(relative)) continue;
-                ArtifactCache.SafePath(stage, relative);
-                runtimeFiles.Add(new PreparedFile(relative, ArtifactCache.Hash(path)));
+                foreach (var path in Directory.EnumerateFiles(Path.Combine(stage, "MelonLoader"), "*", SearchOption.AllDirectories))
+                {
+                    var relative = Relative(stage, path);
+                    if (IsGenerationScratch(relative)) continue;
+                    ArtifactCache.SafePath(stage, relative);
+                    runtimeFiles.Add(new PreparedFile(relative, ArtifactCache.Hash(path)));
+                }
+                RuntimeInstallation.InstallFromStage(gameDirectory, stage, runtimeFiles, fingerprint, _log);
+                if (!RuntimeInstallation.ValidateInstalled(gameDirectory, runtimeFiles, fingerprint))
+                    throw new InvalidDataException("The persistent MelonLoader runtime did not validate after preparation.");
             }
-            RuntimeInstallation.InstallFromStage(gameDirectory, stage, runtimeFiles, fingerprint, _log);
-            if (!RuntimeInstallation.ValidateInstalled(gameDirectory, runtimeFiles, fingerprint))
-                throw new InvalidDataException("The persistent MelonLoader runtime did not validate after preparation.");
         }
 
         // The published preparation contains only patched game payloads. Generated assemblies
@@ -211,6 +231,7 @@ public sealed class PreparationService
             AdapterDirectory = Path.GetDirectoryName(adapter)!,
             PatchEngine = ModPatchRepository,
             AdapterFingerprint = adapterHash,
+            SkipMelonLoader = skipMelonLoader,
             MelonLoaderArchive = melonZip,
             BootstrapHash = bootstrapHash,
             Inputs = inputs,
@@ -393,7 +414,7 @@ public sealed class PreparationService
     }
 
     private PreparedSession? FindOfflineSession(string cacheDirectory, string inputKey, ModLaunchSettings settings, FileVerificationCache? verification,
-        string? adapterFingerprint = null)
+        string? adapterFingerprint = null, bool skipMelonLoader = false)
     {
         var root = ArtifactCache.SafePath(cacheDirectory, CacheLayout.ModdedFiles);
         if (!Directory.Exists(root)) return null;
@@ -406,8 +427,9 @@ public sealed class PreparationService
                 var manifest = ReadManifest(path);
                 manifest.Session.DotnetRoot = HostRuntime.Resolve().DotnetRoot;
                 if (manifest.Session.PatchEngine == ModPatchRepository &&
+                    manifest.Session.SkipMelonLoader == skipMelonLoader &&
                     (adapterFingerprint is null || manifest.Session.AdapterFingerprint == adapterFingerprint) &&
-                    manifest.InputKey == inputKey && manifest.MelonLoaderVersion == settings.MelonLoaderVersion && manifest.AdapterRepository == settings.AdapterRepository &&
+                    manifest.InputKey == inputKey && (skipMelonLoader || manifest.MelonLoaderVersion == settings.MelonLoaderVersion) && manifest.AdapterRepository == settings.AdapterRepository &&
                     ValidateSession(manifest.Session, directory, cacheDirectory, inputKey, verification: verification)) return manifest.Session;
             }
             catch (Exception ex) when (ex is JsonException or InvalidDataException or IOException) { _log("Skipping invalid cached preparation: " + ex.Message); }
@@ -420,11 +442,17 @@ public sealed class PreparationService
     {
         if (session.LayoutVersion != 3 || !ArtifactCache.IsHash(session.Fingerprint) ||
             preparedDirectory != ArtifactCache.SafePath(cacheDirectory, CacheLayout.ModdedFiles) || session.PreparedDirectory != preparedDirectory ||
-            session.MelonLoaderArchive != ArtifactCache.SafePath(cacheDirectory, $"downloads/MelonLoader-{MelonVersion}.x64.zip") ||
-            !ArtifactCache.IsHash(session.BootstrapHash) || !Matches(session.MelonLoaderArchive, expectedMelonHash, verification) ||
-            !FileOps.HashEquals(ArtifactCache.BootstrapHash(session.MelonLoaderArchive), session.BootstrapHash) ||
             session.Files is null || session.Inputs is null || session.RuntimeFiles is null || session.Files.Count == 0 ||
             ComputeHash(JsonSerializer.Serialize(session.Inputs, JsonDefaults.Options)) != inputKey) return false;
+        if (session.SkipMelonLoader)
+        {
+            if (!string.IsNullOrEmpty(session.MelonLoaderArchive) || !string.IsNullOrEmpty(session.BootstrapHash) ||
+                !string.IsNullOrEmpty(session.BootstrapArchive) || !string.IsNullOrEmpty(session.BootstrapArchiveSha256) || session.RuntimeFiles.Count != 0)
+                return false;
+        }
+        else if (session.MelonLoaderArchive != ArtifactCache.SafePath(cacheDirectory, $"downloads/MelonLoader-{MelonVersion}.x64.zip") ||
+            !ArtifactCache.IsHash(session.BootstrapHash) || !Matches(session.MelonLoaderArchive, expectedMelonHash, verification) ||
+            !FileOps.HashEquals(ArtifactCache.BootstrapHash(session.MelonLoaderArchive), session.BootstrapHash)) return false;
         _ = HostRuntime.ResolveFromRoot(session.DotnetRoot);
         var outputPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var sourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -455,13 +483,13 @@ public sealed class PreparationService
             if (file is null || string.IsNullOrWhiteSpace(file.RelativePath) || !runtimePaths.Add(file.RelativePath.Replace('\\', '/')) || !ArtifactCache.IsHash(file.Sha256) ||
                 !file.RelativePath.StartsWith("MelonLoader/", StringComparison.Ordinal) || file.SourcePath is not null || IsGenerationScratch(file.RelativePath)) return false;
         }
-        foreach (var required in new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll",
+        foreach (var required in session.SkipMelonLoader ? Array.Empty<string>() : new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll",
                      "MelonLoader/net6/MelonLoader.runtimeconfig.json", "MelonLoader/net6/MelonLoader.deps.json" })
             if (!runtimePaths.Contains(required)) return false;
         if (!Directory.EnumerateFiles(session.PreparedDirectory, "*", SearchOption.AllDirectories)
                 .All(x => sourcePaths.Contains(Relative(session.PreparedDirectory, x)) ||
                     Relative(session.PreparedDirectory, x) is CacheLayout.PreparationManifest or CacheLayout.PatchResults)) return false;
-        return RuntimeInstallation.ValidateInstalled(Directory.GetParent(cacheDirectory)!.FullName, session.RuntimeFiles, session.Fingerprint, verification);
+        return session.SkipMelonLoader || RuntimeInstallation.ValidateInstalled(Directory.GetParent(cacheDirectory)!.FullName, session.RuntimeFiles, session.Fingerprint, verification);
     }
 
     private static PreparationManifest ReadManifest(string path)

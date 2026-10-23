@@ -12,6 +12,7 @@ internal static class Program
         try
         {
             var options = ParseArguments(args);
+            bool skipMelonLoader = options.GetValueOrDefault("--skip-melonloader") == "true";
             string staging = Path.GetFullPath(Required(options, "--game-dir"));
             string patchPath = Path.GetFullPath(Required(options, "--patch-info"));
             resultPath = Path.GetFullPath(Required(options, "--result"));
@@ -33,7 +34,7 @@ internal static class Program
                 previousBundleVersion == result.GameVersion ? "already-correct" : "applied",
                 $"{previousBundleVersion} -> {result.GameVersion} in {UnityBundleVersion.RelativePath}"));
             Console.WriteLine($"Unity bundle version: {previousBundleVersion} -> {result.GameVersion}.");
-            if (game.MetadataNormalizedForParser)
+            if (game.MetadataNormalizedForParser && !skipMelonLoader)
             {
                 Console.WriteLine("Runtime metadata requires a parser-only normalization; generating compatible MelonLoader assemblies.");
                 result.InteropGenerated = MelonInteropAssemblyGenerator.TryGenerate(staging,
@@ -78,14 +79,16 @@ internal static class Program
         }
     }
 
-    private static Dictionary<string, string> ParseArguments(string[] args)
+    internal static Dictionary<string, string> ParseArguments(string[] args)
     {
         if (args.Length == 0 || args[0] != "prepare" || args.Length % 2 != 1)
-            throw new ArgumentException("Usage: prepare --game-dir <staging> --patch-info <json> --result <json> [--patch-revision <sha>] [--cache-dir <path>]");
-        string[] known = ["--game-dir", "--patch-info", "--result", "--patch-revision", "--cache-dir"];
+            throw new ArgumentException("Usage: prepare --game-dir <staging> --patch-info <json> --result <json> [--patch-revision <sha>] [--cache-dir <path>] [--skip-melonloader <true|false>]");
+        string[] known = ["--game-dir", "--patch-info", "--result", "--patch-revision", "--cache-dir", "--skip-melonloader"];
         var options = new Dictionary<string, string>(StringComparer.Ordinal);
         for (int i = 1; i < args.Length; i += 2)
             if (!known.Contains(args[i]) || !options.TryAdd(args[i], args[i + 1])) throw new ArgumentException($"Unknown or repeated argument: {args[i]}.");
+        if (options.TryGetValue("--skip-melonloader", out string? skip) && skip is not ("true" or "false"))
+            throw new ArgumentException("--skip-melonloader must be true or false.");
         return options;
     }
 

@@ -35,6 +35,7 @@ public sealed class PreparedSession
     public string AdapterDirectory { get; set; } = "";
     public string? PatchEngine { get; set; }
     public string? AdapterFingerprint { get; set; }
+    public bool SkipMelonLoader { get; set; }
     public string MelonLoaderArchive { get; set; } = "";
     public string BootstrapHash { get; set; } = "";
     // Optional launch-only native bootstrap selection; the official runtime archive stays separate.

@@ -18,13 +18,13 @@ public static class RuntimeInstallation
     public const string GeneratorConfig = "MelonLoader/Dependencies/Il2CppAssemblyGenerator/Config.cfg";
     private static readonly string[] ProxyNames = ["version.dll", "winhttp.dll", "winmm.dll", "dinput8.dll", "dsound.dll", "dxgi.dll", "d3d11.dll", "opengl32.dll", "xinput1_3.dll", "xinput9_1_0.dll", "doorstop_config.ini"];
 
-    public static void Preflight(string root)
+    public static void Preflight(string root, bool skipMelonLoader = false)
     {
         foreach (string proxy in ProxyNames)
             if (File.Exists(FileOps.SafePath(root, proxy))) throw new InvalidDataException($"An existing loader/hook conflicts with SCPSL-ModLaunch: {proxy}. Begin with a clean Steam installation.");
         if (Directory.Exists(FileOps.SafePath(root, "BepInEx"))) throw new InvalidDataException("An existing BepInEx installation conflicts with SCPSL-ModLaunch.");
         string marker = FileOps.SafePath(root, ".modlaunch/runtime-owner.json");
-        if (Directory.Exists(FileOps.SafePath(root, "MelonLoader")) && !File.Exists(marker))
+        if (!skipMelonLoader && Directory.Exists(FileOps.SafePath(root, "MelonLoader")) && !File.Exists(marker))
             throw new InvalidDataException("An existing MelonLoader installation is not owned by SCPSL-ModLaunch. Remove its runtime before using this tool; preserve your user folders.");
     }
 

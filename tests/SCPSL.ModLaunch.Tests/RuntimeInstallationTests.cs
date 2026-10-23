@@ -70,6 +70,31 @@ public sealed class RuntimeInstallationTests
     }
 
     [Fact]
+    public void SkippingMelonLoaderLeavesAnUnownedDormantRuntimeUntouched()
+    {
+        using var game = new TestGame();
+        game.Write("MelonLoader/net6/MelonLoader.dll", [42]);
+
+        RuntimeInstallation.Preflight(game.Root, skipMelonLoader: true);
+
+        Assert.Equal(new byte[] { 42 }, File.ReadAllBytes(Path.Combine(game.Root, "MelonLoader/net6/MelonLoader.dll")));
+        Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch/runtime-owner.json")));
+    }
+
+    [Theory]
+    [InlineData("version.dll")]
+    [InlineData("winhttp.dll")]
+    public void SkippingMelonLoaderStillRejectsExistingLoaderEntryPoints(string path)
+    {
+        using var game = new TestGame();
+        game.Write(path, [42]);
+
+        Assert.Throws<InvalidDataException>(() => RuntimeInstallation.Preflight(game.Root, skipMelonLoader: true));
+
+        Assert.Equal(new byte[] { 42 }, File.ReadAllBytes(Path.Combine(game.Root, path)));
+    }
+
+    [Fact]
     public void OwnershipMarkerCannotClaimUserFiles()
     {
         using var game = new TestGame();

@@ -5,21 +5,29 @@ using Tomlet.Models;
 
 namespace SCPSL.ModLaunch.Core;
 
-public sealed record LaunchArguments(bool RecoverOnly, string[] GameArguments);
+public sealed record LaunchArguments(bool RecoverOnly, string[] GameArguments,
+    bool NoRestore = false, bool NoMelonLoader = false, bool NoStart = false);
 
 public static class GameArguments
 {
     public static LaunchArguments Parse(string[] args)
     {
         var forwarded = new List<string>();
-        bool recover = false;
+        bool recover = false, noRestore = false, noMelonLoader = false, noStart = false;
         foreach (string arg in args)
         {
-            if (arg == "--modlaunch-recover-only") { recover = true; continue; }
-            forwarded.Add(arg);
+            switch (arg)
+            {
+                case "--modlaunch-recover-only": recover = true; break;
+                case "--modlaunch-no-restore": noRestore = true; break;
+                case "--modlaunch-no-melonloader": noMelonLoader = true; break;
+                case "--modlaunch-no-start": noStart = true; break;
+                default: forwarded.Add(arg); break;
+            }
         }
-        if (recover && forwarded.Count != 0) throw new ArgumentException("--modlaunch-recover-only cannot be combined with game arguments.");
-        return new LaunchArguments(recover, forwarded.ToArray());
+        if (recover && (noRestore || noMelonLoader || noStart || forwarded.Count != 0))
+            throw new ArgumentException("--modlaunch-recover-only cannot be combined with other launcher options or game arguments.");
+        return new LaunchArguments(recover, forwarded.ToArray(), noRestore, noMelonLoader, noStart);
     }
 
     public static ProcessStartInfo StartInfo(string gameDirectory, string dotnetRoot, IEnumerable<string> args)

@@ -132,6 +132,64 @@ public sealed class PreparedCacheTests
         Assert.False(cache.Validate());
     }
 
+    [Fact]
+    public void PatchOnlyCacheRequiresNoMelonLoaderArchiveOrInstalledRuntime()
+    {
+        using var cache = new CachedPreparation(skipMelonLoader: true);
+        Assert.True(cache.Validate());
+        cache.Session.SkipMelonLoader = false;
+        Assert.False(cache.Validate());
+    }
+
+    [Fact]
+    public void FullPreparationCannotBeReusedAsAPatchOnlyCache()
+    {
+        using var cache = new CachedPreparation();
+        cache.Session.SkipMelonLoader = true;
+        Assert.False(cache.Validate());
+    }
+
+    [Fact]
+    public void PatchOnlyCacheLeavesAnExistingUnownedRuntimeUntouched()
+    {
+        using var cache = new CachedPreparation(skipMelonLoader: true);
+        string runtime = Path.Combine(cache.GameRoot, "MelonLoader", "custom-runtime.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(runtime)!);
+        File.WriteAllText(runtime, "user-owned runtime");
+        Assert.True(cache.Validate());
+        Assert.Equal("user-owned runtime", File.ReadAllText(runtime));
+    }
+
+    [Theory]
+    [InlineData("archive")]
+    [InlineData("bootstrap")]
+    [InlineData("bootstrap-archive")]
+    [InlineData("bootstrap-archive-hash")]
+    [InlineData("runtime")]
+    public void PatchOnlyCacheRejectsLoaderPayloads(string payload)
+    {
+        using var cache = new CachedPreparation(skipMelonLoader: true);
+        switch (payload)
+        {
+            case "archive": cache.Session.MelonLoaderArchive = "unexpected.zip"; break;
+            case "bootstrap": cache.Session.BootstrapHash = new string('A', 64); break;
+            case "bootstrap-archive": cache.Session.BootstrapArchive = "unexpected.zip"; break;
+            case "bootstrap-archive-hash": cache.Session.BootstrapArchiveSha256 = new string('A', 64); break;
+            case "runtime": cache.Session.RuntimeFiles.Add(new PreparedFile("MelonLoader/net6/MelonLoader.dll", new string('A', 64))); break;
+        }
+        Assert.False(cache.Validate());
+    }
+
+    [Theory]
+    [InlineData("GameAssembly.dll")]
+    [InlineData(UnityBundleVersion.RelativePath)]
+    public void PatchOnlyCacheStillRejectsChangedGamePayloads(string relative)
+    {
+        using var cache = new CachedPreparation(skipMelonLoader: true);
+        File.AppendAllText(cache.PayloadPath(relative), "corrupt");
+        Assert.False(cache.Validate());
+    }
+
     private sealed class CachedPreparation : IDisposable
     {
         private readonly TestGame game = new();
@@ -140,9 +198,9 @@ public sealed class PreparedCacheTests
         private string CacheDirectory => Path.Combine(game.Root, ".modlaunch");
         private string PreparedDirectory => Path.Combine(CacheDirectory, CacheLayout.ModdedFiles);
         private string InputKey { get; }
-        private string ArchiveHash { get; }
+        private string ArchiveHash { get; } = "";
 
-        public CachedPreparation()
+        public CachedPreparation(bool skipMelonLoader = false)
         {
             Session = new PreparedSession
             {
@@ -150,18 +208,20 @@ public sealed class PreparedCacheTests
                 Fingerprint = new string('A', 64),
                 GameVersion = "14.2.7",
                 DotnetRoot = Path.Combine(game.Root, "host-dotnet"),
-                MelonLoaderArchive = Path.Combine(CacheDirectory, "downloads", "MelonLoader-0.7.3.x64.zip"),
+                SkipMelonLoader = skipMelonLoader,
+                MelonLoaderArchive = skipMelonLoader ? "" : Path.Combine(CacheDirectory, "downloads", "MelonLoader-0.7.3.x64.zip"),
                 Inputs = game.Originals.Keys.Select(name => new FileIdentity(name, FileOps.Hash(Path.Combine(game.Root, name)))).ToList()
             };
             Session.PreparedDirectory = PreparedDirectory;
             InputKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(Session.Inputs, JsonDefaults.Options))));
             foreach (var path in new[] { "SCPSL.exe", "GameAssembly.dll", UnityBundleVersion.RelativePath })
                 Session.Files.Add(WriteFixture(Session.PreparedDirectory, path, CacheLayout.ModdedFile(path)));
+            HostRuntimeTests.WriteRuntime(Session.DotnetRoot, "6.0.36");
+            if (skipMelonLoader) return;
             string stage = Path.Combine(game.Root, "runtime-stage");
             foreach (var path in new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll", "MelonLoader/net6/MelonLoader.runtimeconfig.json", "MelonLoader/net6/MelonLoader.deps.json", RuntimeInstallation.GeneratorConfig })
                 Session.RuntimeFiles.Add(WriteFixture(stage, path));
             RuntimeInstallation.InstallFromStage(game.Root, stage, Session.RuntimeFiles, Session.Fingerprint);
-            HostRuntimeTests.WriteRuntime(Session.DotnetRoot, "6.0.36");
             Directory.CreateDirectory(Path.GetDirectoryName(Session.MelonLoaderArchive)!);
             using (var archive = ZipFile.Open(Session.MelonLoaderArchive, ZipArchiveMode.Create))
             using (var stream = new StreamWriter(archive.CreateEntry("version.dll").Open())) stream.Write("verified bootstrap");
