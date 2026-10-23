@@ -10,6 +10,21 @@ namespace SCPSL.ModLaunch.Tests;
 
 public sealed class LauncherUpdaterTests
 {
+    [Fact]
+    public async Task LegacyPendingDownloadIsRenamedAndAppliedWithoutDownloadingAgain()
+    {
+        using var fixture = new Fixture();
+        using var updater = fixture.Updater();
+        await updater.CheckAsync();
+        string legacy = Path.Combine(fixture.Updates, "launcher-" + fixture.Digest + ".bin");
+        File.Move(fixture.Staged, legacy);
+        int requests = fixture.Requests.Count;
+        Assert.True(updater.TryApplyPending());
+        Assert.Equal(fixture.Payload, File.ReadAllBytes(fixture.Executable));
+        Assert.False(File.Exists(legacy));
+        Assert.Equal(requests, fixture.Requests.Count);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -26,7 +41,7 @@ public sealed class LauncherUpdaterTests
         Assert.Equal(fixture.Payload, File.ReadAllBytes(fixture.Executable));
         Assert.Equal(fixture.Executable, updater.AppliedExecutablePath);
         Assert.False(File.Exists(fixture.Pending));
-        Assert.Equal(fixture.Original, File.ReadAllBytes(Assert.Single(Directory.GetFiles(fixture.Updates, "previous-*.bin"))));
+        Assert.Equal(fixture.Original, File.ReadAllBytes(Assert.Single(Directory.GetFiles(fixture.Updates, "SCPSL-ModLaunch.previous-*.exe.disabled"))));
     }
 
     [Theory]
@@ -310,7 +325,7 @@ public sealed class LauncherUpdaterTests
     public async Task ReleaseWithoutCompanionUsesTheBundledAdapter()
     {
         using var fixture = new Fixture();
-        const string relative = ".modlaunch/tools/adapter-bundled/SCPSL-ModLaunch.ModPatch.Headless.exe";
+        const string relative = ".modlaunch/patching-tools/bundled/SCPSL-ModLaunch.ModPatch.Headless.exe";
         fixture.Game.Write(relative, Encoding.UTF8.GetBytes("bundled adapter"));
         var service = new PreparationService(fixture.Logs.Add, fixture.Http);
         string adapter = await service.ResolveAdapterAsync(Path.Combine(fixture.Game.Root, ".modlaunch"), LauncherUpdater.Repository, CancellationToken.None);
@@ -326,7 +341,7 @@ public sealed class LauncherUpdaterTests
         public string Executable { get; }
         public string Updates => Path.Combine(Game.Root, ".modlaunch/updates");
         public string Pending => Path.Combine(Updates, "pending.json");
-        public string Staged => Path.Combine(Updates, "launcher-" + Digest + ".bin");
+        public string Staged => Path.Combine(Updates, "SCPSL-ModLaunch.update-" + Digest + ".exe.download");
         public string Ownership => Path.Combine(Game.Root, ".modlaunch/launcher-installation.json");
         public string Shortcut => Path.Combine(Game.Root, LauncherInstallation.ShortcutName);
         public byte[] Original { get; } = Encoding.UTF8.GetBytes("original launcher fixture");

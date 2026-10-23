@@ -28,9 +28,9 @@ public static class RuntimeInstallation
             throw new InvalidDataException("An existing MelonLoader installation is not owned by SCPSL-ModLaunch. Remove its runtime before using this tool; preserve your user folders.");
     }
 
-    public static void InstallPersistentFiles(string root, PreparedSession prepared, Action<string>? log = null)
+    public static void InstallPersistentFiles(string root, PreparedSession prepared, Action<string>? log = null, FileVerificationCache? verification = null)
     {
-        if (!ValidateInstalled(root, prepared.RuntimeFiles, prepared.Fingerprint))
+        if (!ValidateInstalled(root, prepared.RuntimeFiles, prepared.Fingerprint, verification))
             throw new InvalidDataException("The installed MelonLoader runtime changed after preparation. Restart ModLaunch to repair it.");
         log?.Invoke("Using the installed MelonLoader runtime and generated assemblies.");
         foreach (string folder in new[] { "Mods", "Plugins", "UserData", "UserLibs" }) Directory.CreateDirectory(FileOps.SafePath(root, folder));
@@ -95,7 +95,7 @@ public static class RuntimeInstallation
         foreach (string folder in new[] { "Mods", "Plugins", "UserData", "UserLibs" }) Directory.CreateDirectory(FileOps.SafePath(root, folder));
     }
 
-    public static bool ValidateInstalled(string root, IReadOnlyList<PreparedFile> files, string fingerprint)
+    public static bool ValidateInstalled(string root, IReadOnlyList<PreparedFile> files, string fingerprint, FileVerificationCache? verification = null)
     {
         if (files.Count == 0 || string.IsNullOrWhiteSpace(fingerprint)) return false;
         RuntimeOwnership owner = ReadOwnership(root);
@@ -106,7 +106,7 @@ public static class RuntimeInstallation
         {
             string path = RuntimePath(root, file.RelativePath);
             if (!seen.Add(file.RelativePath) || !owned.Contains(file.RelativePath) || !IsHash(file.Sha256) || !File.Exists(path)) return false;
-            if (!IsMutable(file.RelativePath) && !FileOps.HashEquals(FileOps.Hash(path), file.Sha256)) return false;
+            if (!IsMutable(file.RelativePath) && !(verification?.Matches(path, file.Sha256) ?? FileOps.HashEquals(FileOps.Hash(path), file.Sha256))) return false;
         }
         foreach (string required in new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll", "MelonLoader/net6/MelonLoader.runtimeconfig.json", "MelonLoader/net6/MelonLoader.deps.json" })
             if (!seen.Contains(required)) return false;
@@ -116,7 +116,7 @@ public static class RuntimeInstallation
     public static bool IsMutable(string path) => path.Equals(GeneratorConfig, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Records only the outputs explicitly listed by a completed owned generator run.</summary>
-    public static bool CaptureGeneratedFiles(string root, Action<string>? log = null)
+    public static bool CaptureGeneratedFiles(string root, Action<string>? log = null, FileVerificationCache? verification = null)
     {
         try
         {
@@ -129,11 +129,12 @@ public static class RuntimeInstallation
             var owned = owner.OwnedPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
             var identities = owner.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
             // A marker alone cannot authorize adoption from an unrelated or incomplete loader.
+            // Capture always hashes contents and also refreshes the verification metadata.
             foreach (string required in new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll", "MelonLoader/net6/MelonLoader.runtimeconfig.json", "MelonLoader/net6/MelonLoader.deps.json" })
             {
                 if (!owned.Contains(required) || !identities.TryGetValue(required, out var identity)) return false;
                 string path = RuntimePath(root, required);
-                if (!File.Exists(path) || !FileOps.HashEquals(FileOps.Hash(path), identity.Sha256)) return false;
+                if (!File.Exists(path) || !FileOps.HashEquals(verification?.HashFresh(path) ?? FileOps.Hash(path), identity.Sha256)) return false;
             }
             string configPath = RuntimePath(root, GeneratorConfig);
             if (!File.Exists(configPath)) return false;
@@ -148,7 +149,7 @@ public static class RuntimeInstallation
                 string relative = "MelonLoader/Il2CppAssemblies/" + name.Value;
                 string path = RuntimePath(root, relative);
                 if (!File.Exists(path)) throw new InvalidDataException($"Generator output is missing: {name.Value}.");
-                if (!outputs.TryAdd(relative, new PreparedFile(relative, FileOps.Hash(path))))
+                if (!outputs.TryAdd(relative, new PreparedFile(relative, verification?.HashFresh(path) ?? FileOps.Hash(path))))
                     throw new InvalidDataException("Generator OldFiles contains duplicate filenames.");
             }
             // Do not refresh known immutable hashes: a file changed outside the generator must
@@ -159,7 +160,7 @@ public static class RuntimeInstallation
                     owned.Add(output.RelativePath);
                     identities[output.RelativePath] = output;
                 }
-            if (owned.Add(GeneratorConfig)) identities[GeneratorConfig] = new PreparedFile(GeneratorConfig, FileOps.Hash(configPath));
+            if (owned.Add(GeneratorConfig)) identities[GeneratorConfig] = new PreparedFile(GeneratorConfig, verification?.HashFresh(configPath) ?? FileOps.Hash(configPath));
             owner.OwnedPaths = owned.OrderBy(path => path, StringComparer.Ordinal).ToList();
             owner.Files = identities.Values.OrderBy(file => file.RelativePath, StringComparer.Ordinal).ToList();
             FileOps.WriteJson(marker, owner);

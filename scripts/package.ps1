@@ -3,7 +3,8 @@ param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
     [switch]$SkipTests,
     [string]$NuGetSource,
-    [string]$ReleaseVersion
+    [string]$ReleaseVersion,
+    [string]$NativeBootstrapPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +16,25 @@ $launcherStage = Join-Path $stageRoot 'launcher'
 $releaseStage = Join-Path $stageRoot 'release'
 $releaseRoot = Join-Path $artifactRoot 'release'
 $bundlePath = Join-Path $artifactRoot 'adapter-bundled.zip'
+$nativeBundlePath = Join-Path $stageRoot 'native-bootstrap-pr13.zip'
+$nativeProvenanceDirectory = Join-Path $projectRoot 'vendor/native-bootstrap-pr13'
+$nativeProvenancePath = Join-Path $nativeProvenanceDirectory 'provenance.json'
+$nativeExpectedHash = '18B6DA09BB8976F0036AEAE428F21D95E2C222420A17C8B985AF4B6D59551BF0'
+$nativeExpectedLength = 11058688
+if (-not $NativeBootstrapPath) {
+    $NativeBootstrapPath = Join-Path $nativeProvenanceDirectory 'version.dll'
+}
+$NativeBootstrapPath = [IO.Path]::GetFullPath($NativeBootstrapPath)
+if (-not (Test-Path -LiteralPath $NativeBootstrapPath -PathType Leaf)) { throw 'The qualified PR13 native bootstrap is missing. Pass -NativeBootstrapPath with the pinned binary.' }
+if ((Get-Item -LiteralPath $NativeBootstrapPath).Length -ne $nativeExpectedLength -or
+    (Get-FileHash -LiteralPath $NativeBootstrapPath -Algorithm SHA256).Hash -ne $nativeExpectedHash) {
+    throw 'NativeBootstrapPath does not match the qualified PR13 binary identity.'
+}
+$nativeProvenance = Get-Content -LiteralPath $nativeProvenancePath -Raw | ConvertFrom-Json
+if ($nativeProvenance.binary.sha256 -ne $nativeExpectedHash -or $nativeProvenance.binary.length -ne $nativeExpectedLength) {
+    throw 'Native bootstrap provenance does not match the packaging pin.'
+}
+
 
 # A published tag must describe the actual EXE version, not just its download URL.
 if ($ReleaseVersion) {
@@ -25,6 +45,14 @@ if ($ReleaseVersion) {
     $parsedVersion = [version]$ReleaseVersion
     if (@($parsedVersion.Major, $parsedVersion.Minor, $parsedVersion.Build, $parsedVersion.Revision).Where({ $_ -gt 65535 }).Count) {
         throw 'Release version components must fit Windows file-version fields (0-65535).'
+    }
+}
+
+function Copy-NativeBootstrapNotices {
+    param([string]$Destination)
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($name in @('README.md', 'provenance.json', 'LICENSE-MelonLoader.md', 'NOTICE-MelonLoader.txt', 'LICENSE-Dobby.txt')) {
+        Copy-Item -LiteralPath (Join-Path $nativeProvenanceDirectory $name) -Destination $Destination -Force
     }
 }
 
@@ -52,11 +80,68 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $adapterStage
     Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md') -Destination $adapterStage
     Copy-Item -LiteralPath (Join-Path $projectRoot 'third-party-licenses') -Destination $adapterStage -Recurse
+    Copy-NativeBootstrapNotices (Join-Path $adapterStage 'third-party-licenses/native-bootstrap-pr13')
+
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $modPatchVendor = Join-Path $projectRoot 'vendor/ModPatch'
+    $modPatchArchive = Join-Path $modPatchVendor 'SCPSL-ModPatch.Cli-win-x64.zip'
+    $modPatchSources = Join-Path $modPatchVendor 'SCPSL-ModPatch.Cli-sources.zip'
+    foreach ($archive in @($modPatchArchive,$modPatchSources)) {
+        $expected = ((Get-Content -LiteralPath ($archive+'.sha256') -Raw) -split '\s+')[0]
+        if ($expected -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expected) {
+            throw 'The pinned ModPatch package failed its checksum. Refresh it with scripts/import-modpatch.ps1.'
+        }
+    }
+    $modPatchStage = Join-Path $adapterStage 'ModPatch'
+    $modPatchZip = [IO.Compression.ZipFile]::OpenRead($modPatchArchive)
+    try {
+        $allowed = [IO.Path]::GetFullPath($modPatchStage) + [IO.Path]::DirectorySeparatorChar
+        foreach ($entry in $modPatchZip.Entries) {
+            $target = [IO.Path]::GetFullPath((Join-Path $modPatchStage $entry.FullName))
+            if (-not $target.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase)) { throw 'ModPatch archive path escaped its staging directory.' }
+        }
+    } finally { $modPatchZip.Dispose() }
+    [IO.Compression.ZipFile]::ExtractToDirectory($modPatchArchive,$modPatchStage)
+    $modPatchIdentity = Get-Content -LiteralPath (Join-Path $modPatchStage 'bundle.json') -Raw | ConvertFrom-Json
+    if ($modPatchIdentity.sourceRepository -ne 'AnomalyLabsIO/SCPSL-ModPatch' -or
+        $modPatchIdentity.sourceSha256 -ne (Get-FileHash -LiteralPath $modPatchSources -Algorithm SHA256).Hash) {
+        throw 'ModPatch binary and source package identities disagree.'
+    }
+    foreach ($file in $modPatchIdentity.files) {
+        $target = [IO.Path]::GetFullPath((Join-Path $modPatchStage $file.relativePath))
+        if (-not $target.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase) -or
+            (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $file.sha256) { throw 'A bundled ModPatch file failed verification.' }
+    }
     $uniqueBundle = Join-Path $stageRoot 'adapter-bundled.zip'
     [IO.Compression.ZipFile]::CreateFromDirectory($adapterStage, $uniqueBundle, [IO.Compression.CompressionLevel]::Optimal, $false)
     Copy-Item -LiteralPath $uniqueBundle -Destination $bundlePath -Force
-    Invoke-DotNet (@('publish', 'src/SCPSL.ModLaunch/SCPSL.ModLaunch.csproj', '-o', $launcherStage, "-p:AdapterBundlePath=$bundlePath") + $publishOptions)
+    # Keep the payload an ordinary deterministic one-entry ZIP; the runtime validates the DLL pin.
+    $nativeStream = [IO.File]::Open($nativeBundlePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+    try {
+        $nativeArchive = [IO.Compression.ZipArchive]::new($nativeStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+        try {
+            $nativeEntry = $nativeArchive.CreateEntry('version.dll', [IO.Compression.CompressionLevel]::Optimal)
+            $nativeEntry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+            $nativeEntry.ExternalAttributes = 0
+            $nativeInput = [IO.File]::OpenRead($NativeBootstrapPath)
+            $nativeOutput = $nativeEntry.Open()
+            try { $nativeInput.CopyTo($nativeOutput) }
+            finally { $nativeOutput.Dispose(); $nativeInput.Dispose() }
+        } finally { $nativeArchive.Dispose() }
+    } finally { $nativeStream.Dispose() }
+    $nativeCheck = [IO.Compression.ZipFile]::OpenRead($nativeBundlePath)
+    try {
+        if ($nativeCheck.Entries.Count -ne 1 -or $nativeCheck.Entries[0].FullName -cne 'version.dll' -or $nativeCheck.Entries[0].Length -ne $nativeExpectedLength) {
+            throw 'The native bootstrap resource ZIP has an unexpected layout.'
+        }
+        $nativeEntryStream = $nativeCheck.Entries[0].Open()
+        $nativeHasher = [Security.Cryptography.SHA256]::Create()
+        try { $nativeArchivedHash = [Convert]::ToHexString($nativeHasher.ComputeHash($nativeEntryStream)) }
+        finally { $nativeHasher.Dispose(); $nativeEntryStream.Dispose() }
+        if ($nativeArchivedHash -ne $nativeExpectedHash) { throw 'The native resource ZIP changed the qualified DLL bytes.' }
+    } finally { $nativeCheck.Dispose() }
+    Copy-Item -LiteralPath $nativeBundlePath -Destination (Join-Path $artifactRoot 'native-bootstrap-pr13.zip') -Force
+    Invoke-DotNet (@('publish', 'src/SCPSL.ModLaunch/SCPSL.ModLaunch.csproj', '-o', $launcherStage, "-p:AdapterBundlePath=$bundlePath", "-p:NativeBootstrapBundlePath=$nativeBundlePath") + $publishOptions)
     $launcherExe = Join-Path $launcherStage 'SCPSL-ModLaunch.exe'
     if (-not (Test-Path -LiteralPath $launcherExe)) { throw 'The launcher publish did not produce SCPSL-ModLaunch.exe.' }
     if ($ReleaseVersion) {
@@ -67,6 +152,7 @@ try {
     Copy-Item -LiteralPath $launcherExe -Destination $releaseStage -Force
     $adapterName = 'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip'
     Copy-Item -LiteralPath $bundlePath -Destination (Join-Path $releaseStage $adapterName) -Force
+    Copy-Item -LiteralPath $modPatchSources,($modPatchSources+'.sha256') -Destination $releaseStage -Force
     foreach ($name in @('SCPSL-ModLaunch.exe', $adapterName)) {
         $digest = (Get-FileHash -LiteralPath (Join-Path $releaseStage $name) -Algorithm SHA256).Hash.ToLowerInvariant()
         [IO.File]::WriteAllText((Join-Path $releaseStage ($name + '.sha256')), "$digest  $name`n", [Text.UTF8Encoding]::new($false))
@@ -77,6 +163,8 @@ try {
     $releaseNotices = Join-Path $releaseStage 'third-party-licenses'
     New-Item -ItemType Directory -Path $releaseNotices -Force | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'third-party-licenses') -File | Copy-Item -Destination $releaseNotices -Force
+    Copy-NativeBootstrapNotices (Join-Path $releaseNotices 'native-bootstrap-pr13')
+
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'vendor/ModPatch') -Filter '*.txt' -File | Copy-Item -Destination $releaseNotices -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot 'vendor/ModPatch/PROVENANCE.md') -Destination (Join-Path $releaseNotices 'ModPatch-PROVENANCE.md') -Force
     $releaseDocs = Join-Path $releaseStage 'docs'

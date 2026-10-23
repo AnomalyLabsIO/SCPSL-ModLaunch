@@ -3,6 +3,7 @@
     <OutputType>Exe</OutputType>
     <AssemblyName>SCPSL-ModLaunch</AssemblyName>
     <RootNamespace>SCPSL.ModLaunch</RootNamespace>
+    <ApplicationIcon>Assets/modlaunch.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -12,5 +13,10 @@
   <ItemGroup>
     <ProjectReference Include="../SCPSL.ModLaunch.Core/SCPSL.ModLaunch.Core.csproj" />
     <EmbeddedResource Include="$(AdapterBundlePath)" LogicalName="adapter-bundled.zip" Condition="'$(AdapterBundlePath)' != '' and Exists('$(AdapterBundlePath)')" />
+    <EmbeddedResource Include="$(NativeBootstrapBundlePath)" LogicalName="native-bootstrap-pr13.zip" Condition="'$(NativeBootstrapBundlePath)' != '' and Exists('$(NativeBootstrapBundlePath)')" />
+    <EmbeddedResource Include="../../vendor/native-bootstrap-pr13/provenance.json" LogicalName="native-bootstrap-pr13.provenance.json" />
   </ItemGroup>
+  <Target Name="RequireNativeBootstrapForPublish" BeforeTargets="PrepareForPublish">
+    <Error Condition="'$(NativeBootstrapBundlePath)' == '' or !Exists('$(NativeBootstrapBundlePath)')" Text="Publish through scripts/package.ps1 with the qualified native bootstrap bundle." />
+  </Target>
 </Project>

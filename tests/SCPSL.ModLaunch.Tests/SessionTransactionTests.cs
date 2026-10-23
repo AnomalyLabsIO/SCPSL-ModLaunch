@@ -35,6 +35,24 @@ public sealed class SessionTransactionTests
     }
 
     [Fact]
+    public void ParserMetadataCannotBeActivatedAsARuntimeOutput()
+    {
+        using var game = new TestGame();
+        var prepared = game.Prepare();
+        string source = "parser-metadata.bin";
+        File.WriteAllText(Path.Combine(game.Stage, source), "parser-only v31 metadata");
+        prepared.Files.Add(new PreparedFile(SessionTransaction.RuntimeMetadataPath,
+            FileOps.Hash(Path.Combine(game.Stage, source)), source));
+
+        var transaction = new SessionTransaction(game.Root);
+        var error = Assert.Throws<InvalidDataException>(() => transaction.Create(prepared));
+        Assert.Contains("Runtime metadata must remain unchanged", error.Message);
+        Assert.Null(transaction.LoadPending());
+        foreach (var (path, original) in game.Originals)
+            Assert.Equal(original, File.ReadAllBytes(Path.Combine(game.Root, path)));
+    }
+
+    [Fact]
     public void PreparedSessionDoesNotActivateWhenItsInputFingerprintChanged()
     {
         using var game = new TestGame();
@@ -160,7 +178,7 @@ public sealed class SessionTransactionTests
         var transaction = new SessionTransaction(game.Root);
         var journal = transaction.Create(prepared);
         var loader = journal.Entries.Single(e => e.RelativePath == "version.dll");
-        Assert.Equal($"sessions/{journal.Id}/bootstrap.bin", loader.PreparedSource);
+        Assert.Equal($"temporary/session-{journal.Id}/version.dll.modded", loader.PreparedSource);
         Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch"), "version.dll", SearchOption.AllDirectories));
         transaction.Activate(journal);
         Assert.Equal(prepared.BootstrapHash, FileOps.Hash(Path.Combine(game.Root, "version.dll")));
@@ -194,17 +212,25 @@ public sealed class SessionTransactionTests
         foreach (var (path, bytes) in game.Originals) Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(game.Root, path)));
     }
 
-    [Fact]
-    public void LegacyJournalWithoutBundleVersionEntryRemainsRecoverable()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void LegacyJournalsRemainRecoverableBeforeAnyFolderMigration(int schema)
     {
         using var game = new TestGame();
         var transaction = new SessionTransaction(game.Root);
         var journal = transaction.Create(game.Prepare());
-        journal.SchemaVersion = 1;
-        journal.Entries.RemoveAll(e => e.RelativePath == UnityBundleVersion.RelativePath);
+        journal.SchemaVersion = schema;
+        if (schema == 1) journal.Entries.RemoveAll(e => e.RelativePath == UnityBundleVersion.RelativePath);
         var ac = journal.Entries.Single(e => e.RelativePath == "SL-AC.dll");
-        ac.ParkedPath = $"sessions/{journal.Id}/parked/SL-AC.dll.disabled";
+        ac.ParkedPath = schema == 1 ? $"sessions/{journal.Id}/parked/SL-AC.dll.disabled" : $"sessions/{journal.Id}/parked/anticheat.bin";
         string cache = Path.Combine(game.Root, ".modlaunch");
+        foreach (var entry in journal.Entries.Where(e => e.OriginalHash != null))
+        {
+            string previous = entry.BackupPath!;
+            entry.BackupPath = $"originals/{entry.OriginalHash!.ToUpperInvariant()}.bin";
+            FileOps.CopyVerified(Path.Combine(cache, previous), Path.Combine(cache, entry.BackupPath), entry.OriginalHash);
+        }
         foreach (var entry in journal.Entries)
         {
             string target = Path.Combine(game.Root, entry.RelativePath);
@@ -302,19 +328,19 @@ public sealed class SessionTransactionTests
         var first = transaction.Create(prepared);
         transaction.Activate(first);
         Assert.True(transaction.Restore(first).Success);
-        string backupDirectory = Path.Combine(game.Root, ".modlaunch", "originals");
-        var before = Directory.GetFiles(backupDirectory).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        string backupDirectory = Path.Combine(game.Root, ".modlaunch", "original-game-files");
+        var before = Directory.GetFiles(backupDirectory, "*", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).ToArray();
         Assert.Equal(game.Originals.Count, before.Length);
         var hashes = before.Select(FileOps.Hash).ToArray();
 
         var second = transaction.Create(prepared);
         transaction.Activate(second);
         Assert.True(transaction.Restore(second).Success);
-        var after = Directory.GetFiles(backupDirectory).OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        var after = Directory.GetFiles(backupDirectory, "*", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).ToArray();
         Assert.Equal(before, after);
         Assert.Equal(hashes, after.Select(FileOps.Hash));
         Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch"), "version.dll", SearchOption.AllDirectories));
-        Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch", "sessions"), "anticheat.bin", SearchOption.AllDirectories));
+        Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch", "temporary"), "SL-AC.dll.original", SearchOption.AllDirectories));
     }
 
     [Fact]

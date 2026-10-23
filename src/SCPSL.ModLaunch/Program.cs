@@ -19,6 +19,8 @@ internal static class Program
         DirectoryLock? directoryLock = null;
         LauncherUpdater? updater = null;
         Task? updateCheck = null;
+        FileVerificationCache? verification = null;
+        var startup = Stopwatch.StartNew();
         using var cancellation = new CancellationTokenSource();
         bool gameStarted = false;
         bool finishingInstallation = false;
@@ -66,7 +68,8 @@ internal static class Program
             LaunchArguments arguments = GameArguments.Parse(args);
             _ = LauncherInstallation.ResolveGameDirectory(processPath);
             GameProcessGuard.EnsureStopped(root);
-            transaction = new SessionTransaction(root, Log);
+            using (StartupPhase.Start(Log, "metadata cache load")) verification = new FileVerificationCache(root, Log);
+            transaction = new SessionTransaction(root, Log, verification: verification);
             try { journal = transaction.LoadPending(); }
             catch (Exception ex) when (ex is IOException or System.Text.Json.JsonException or InvalidDataException or UnauthorizedAccessException)
             {
@@ -75,19 +78,24 @@ internal static class Program
             if (journal != null)
             {
                 Log("Recovering the interrupted session before doing anything else.");
-                var recovered = transaction.Restore(journal);
+                RestoreResult recovered;
+                using (StartupPhase.Start(Log, "interrupted session restoration")) recovered = transaction.Restore(journal);
                 if (!recovered.Success) throw new RestorationException(recovered.Failures);
                 journal = null;
-                RuntimeInstallation.CaptureGeneratedFiles(root, Log);
-                CacheMaintenance.BeforePreparation(root, Log);
+                RuntimeInstallation.CaptureGeneratedFiles(root, Log, verification);
+                verification.Save();
+                using (StartupPhase.Start(Log, "cache maintenance")) CacheMaintenance.BeforePreparation(root, Log);
                 finishingInstallation = true;
                 LauncherInstallation.Complete(root, processPath, Log);
                 finishingInstallation = false;
                 Dialog("SCPSL-ModLaunch recovery", "Original game files restored. You can now launch vanilla, or run SCPSL-ModLaunch again for a modded session.", false);
                 return 0;
             }
-            RuntimeInstallation.Preflight(root);
-            CacheMaintenance.BeforePreparation(root, Log);
+            using (StartupPhase.Start(Log, "preflight and cache maintenance"))
+            {
+                RuntimeInstallation.Preflight(root);
+                CacheMaintenance.BeforePreparation(root, Log);
+            }
             if (arguments.RecoverOnly)
             {
                 Log("No unfinished session exists; loader entry points are inactive.");
@@ -99,24 +107,33 @@ internal static class Program
             string settingsPath = FileOps.SafePath(cache, "settings.json");
             ModLaunchSettings settings = File.Exists(settingsPath) ? FileOps.ReadJson<ModLaunchSettings>(settingsPath) : new ModLaunchSettings();
             if (!File.Exists(settingsPath)) FileOps.WriteJson(settingsPath, settings);
-            ExtractBundledAdapter(cache);
+            using (StartupPhase.Start(Log, "bundled adapter verification")) ExtractBundledAdapter(cache, verification);
             var preparation = new PreparationService(Log);
-            PreparedSession prepared = await preparation.PrepareAsync(root, cache, settings, cancellation.Token);
+            PreparedSession prepared;
+            using (StartupPhase.Start(Log, "preparation total"))
+                prepared = await preparation.PrepareAsync(root, cache, settings, cancellation.Token, verification);
             cancellation.Token.ThrowIfCancellationRequested();
             GameProcessGuard.EnsureStopped(root);
             RuntimeInstallation.Preflight(root);
-            RuntimeInstallation.InstallPersistentFiles(root, prepared, Log);
-            CacheMaintenance.AfterSuccessfulPreparation(root, prepared, Log);
+            using (StartupPhase.Start(Log, "installed runtime validation"))
+                RuntimeInstallation.InstallPersistentFiles(root, prepared, Log, verification);
+            using (StartupPhase.Start(Log, "successful preparation maintenance")) CacheMaintenance.AfterSuccessfulPreparation(root, prepared, Log);
+            using (StartupPhase.Start(Log, "bundled native bootstrap selection")) SelectBundledNativeBootstrap(cache, prepared);
             LoaderConfig.Update(FileOps.SafePath(root, "UserData/Loader.cfg"), prepared.DotnetRoot);
             Log("Backing up original files and activating the modded session...");
-            journal = transaction.Create(prepared);
+            using (StartupPhase.Start(Log, "original verification and backups")) journal = transaction.Create(prepared);
+            using (StartupPhase.Start(Log, "verification metadata persistence")) verification.Save();
             try
             {
-                transaction.Activate(journal);
+                using (StartupPhase.Start(Log, "session activation")) transaction.Activate(journal);
+                verification.LogSummary();
                 cancellation.Token.ThrowIfCancellationRequested();
                 using var game = new Process { StartInfo = GameArguments.StartInfo(root, prepared.DotnetRoot, arguments.GameArguments) };
-                if (!game.Start()) throw new IOException("SCP:SL could not be started.");
+                using (StartupPhase.Start(Log, "SCP:SL process creation"))
+                    if (!game.Start()) throw new IOException("SCP:SL could not be started.");
                 gameStarted = true;
+                startup.Stop();
+                Log($"Startup total to SCP:SL process start: {startup.Elapsed.TotalMilliseconds:F1} ms.");
                 // If recording the PID fails, we still must wait before touching the running game's files.
                 try { transaction.RecordGameProcess(journal, game); }
                 catch (Exception ex) { Log("Could not record game PID; waiting for exit before recovery: " + ex.Message); }
@@ -128,10 +145,12 @@ internal static class Program
             finally
             {
                 GameProcessGuard.EnsureStopped(root);
-                RestoreResult restored = transaction.Restore(journal);
+                RestoreResult restored;
+                using (StartupPhase.Start(Log, "session restoration")) restored = transaction.Restore(journal);
                 if (!restored.Success) throw new RestorationException(restored.Failures);
                 journal = null;
-                RuntimeInstallation.CaptureGeneratedFiles(root, Log);
+                using (StartupPhase.Start(Log, "generated file capture")) RuntimeInstallation.CaptureGeneratedFiles(root, Log, verification);
+                verification.Save();
                 CacheMaintenance.CleanCompletedSessions(root, Log);
             }
             finishingInstallation = true;
@@ -170,11 +189,18 @@ internal static class Program
         }
     }
 
-    private static void ExtractBundledAdapter(string cache)
+    private static void SelectBundledNativeBootstrap(string cache, PreparedSession prepared)
+    {
+        using Stream resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("native-bootstrap-pr13.zip")
+            ?? throw new InvalidDataException("The packaged PR13 native bootstrap is missing. Use a complete SCPSL-ModLaunch release package.");
+        BundledNativeBootstrap.InstallAndSelect(cache, prepared, resource, Log);
+    }
+
+    private static void ExtractBundledAdapter(string cache, FileVerificationCache verification)
     {
         using Stream? resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("adapter-bundled.zip");
         if (resource == null) return;
-        BundledAdapterInstallation.Install(cache, resource);
+        BundledAdapterInstallation.Install(cache, resource, verification: verification);
     }
 
     private static void Log(string message)

@@ -30,8 +30,19 @@ internal static class ToolDownloads
             throw new InvalidDataException("Dependency download must use an official GitHub HTTPS URL.");
         Directory.CreateDirectory(CacheDirectory);
         string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(url)));
-        string cached = Path.Combine(CacheDirectory, key + ".bin");
+        string cached = Path.Combine(CacheDirectory, CacheName(uri));
         string hashPath = cached + ".sha256";
+        foreach (string oldRoot in new[] { CacheDirectory, Path.Combine(CacheDirectory, "adapter-dependencies") })
+        {
+            string previous = Path.Combine(oldRoot, key + ".bin");
+            if (File.Exists(cached) || !File.Exists(previous) || !File.Exists(previous + ".sha256")) continue;
+            string actual = Hash(previous);
+            if (!actual.Equals(File.ReadAllText(previous + ".sha256"), StringComparison.OrdinalIgnoreCase) ||
+                expectedSha256 != null && !actual.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase)) continue;
+            File.Move(previous, cached);
+            File.Move(previous + ".sha256", hashPath, overwrite: true);
+            if (oldRoot != CacheDirectory && !Directory.EnumerateFileSystemEntries(oldRoot).Any()) Directory.Delete(oldRoot);
+        }
         if (File.Exists(cached) && File.Exists(hashPath))
         {
             string actual = Hash(cached);
@@ -58,6 +69,25 @@ internal static class ToolDownloads
             return cached;
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
+    }
+
+    internal static string CacheName(Uri uri)
+    {
+        string[] parts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        string name = Uri.UnescapeDataString(parts[^1]);
+        if (name == "SCPSL.exe" && parts.Length >= 4 && parts[^3] == "clean_launchers")
+            name = $"Unity-{parts[^2]}-clean-SCPSL-{parts[2][..Math.Min(12, parts[2].Length)]}.exe.download";
+        else if (name == "Managed.zip" && parts.Length >= 2)
+            name = $"Unity-{parts[^2]}-managed.zip";
+        else if (name == "Cpp2IL.Plugin.StrippedCodeRegSupport.dll" && parts.Length >= 2)
+            name = $"Cpp2IL-{parts[^2]}-StrippedCodeRegSupport.dll.download";
+        else if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+            name += ".download";
+        else if (!name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Unsupported preparation download name.");
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.Contains('/') || name.Contains('\\'))
+            throw new InvalidDataException("Invalid preparation download name.");
+        return name;
     }
 
     public static string? PublishedDigest(string repository, string tag, string filename, CancellationToken ct)

@@ -34,9 +34,11 @@ public sealed class RestoreResult
 }
 
 /// <summary>Write-ahead, hash-guarded reversible changes. The caller must hold DirectoryLock throughout.</summary>
-public sealed class SessionTransaction(string gameDirectory, Action<string>? log = null, Action<string>? checkpoint = null)
+public sealed class SessionTransaction(string gameDirectory, Action<string>? log = null, Action<string>? checkpoint = null,
+    FileVerificationCache? verification = null)
 {
     public const string RetailExecutable = "SCPSL.exe";
+    public const string RuntimeMetadataPath = "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat";
     private readonly string root = Path.GetFullPath(gameDirectory);
     private string Cache => FileOps.SafePath(root, ".modlaunch");
     private string JournalPath => FileOps.SafePath(Cache, "session.json");
@@ -53,9 +55,9 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
     public SessionJournal Create(PreparedSession prepared)
     {
         if (File.Exists(JournalPath)) throw new InvalidOperationException("An unfinished session must be restored first.");
-        if (prepared.LayoutVersion != 2) throw new InvalidDataException("The prepared cache uses an obsolete layout; prepare the game again.");
+        if (prepared.LayoutVersion is not (2 or 3)) throw new InvalidDataException("The prepared cache uses an obsolete layout; prepare the game again.");
         if (prepared.Inputs.Count == 0) throw new InvalidDataException("Preparation supplied no original file identities.");
-        var journal = new SessionJournal { SchemaVersion = 2, Id = Guid.NewGuid().ToString("N"), GameDirectory = root, Fingerprint = prepared.Fingerprint };
+        var journal = new SessionJournal { SchemaVersion = 3, Id = Guid.NewGuid().ToString("N"), GameDirectory = root, Fingerprint = prepared.Fingerprint };
         var entries = new Dictionary<string, JournalEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var input in prepared.Inputs)
         {
@@ -69,6 +71,8 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
         foreach (var file in prepared.Files)
         {
             string rel = NormalizeTarget(file.RelativePath);
+            if (rel.Equals(RuntimeMetadataPath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Runtime metadata must remain unchanged; a parser copy cannot be activated.");
             if (rel.Equals("version.dll", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("An adapter cannot supply the loader bootstrap.");
             string source = FileOps.SafePath(prepared.PreparedDirectory, file.SourcePath ?? file.RelativePath);
@@ -89,18 +93,19 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
         if (!entries.TryGetValue("SL-AC.dll", out var ac)) throw new InvalidDataException("Preparation must record whether SL-AC.dll exists.");
         if (ac.Action != FileAction.Observe) throw new InvalidDataException("The adapter must not replace SL-AC.dll.");
         ac.Action = FileAction.Park;
-        ac.ParkedPath = $"sessions/{journal.Id}/parked/anticheat.bin";
+        ac.ParkedPath = $"{CacheLayout.SessionFolder(journal.Id)}/SL-AC.dll.original";
         EnsureAbsent("version.dll");
-        string bootstrapSource = $"sessions/{journal.Id}/bootstrap.bin";
+        string bootstrapSource = $"{CacheLayout.SessionFolder(journal.Id)}/version.dll.modded";
         ExtractBootstrap(prepared, FileOps.SafePath(Cache, bootstrapSource));
         entries.Add("version.dll", new JournalEntry { RelativePath = "version.dll", Action = FileAction.Replace, PreparedHash = prepared.BootstrapHash, PreparedSource = bootstrapSource });
 
         foreach (var entry in entries.Values.Where(e => e.OriginalHash != null))
         {
-            entry.BackupPath = $"originals/{entry.OriginalHash!.ToUpperInvariant()}.bin";
+            entry.BackupPath = CacheLayout.OriginalFile(entry.RelativePath, entry.OriginalHash!);
             string backup = FileOps.SafePath(Cache, entry.BackupPath);
-            if (!File.Exists(backup) || !FileOps.HashEquals(FileOps.Hash(backup), entry.OriginalHash))
-                FileOps.CopyVerified(FileOps.SafePath(root, entry.RelativePath), backup, entry.OriginalHash);
+            if (File.Exists(backup)) CheckHash(backup, entry.OriginalHash);
+            else
+                FileOps.CopyVerified(FileOps.SafePath(root, entry.RelativePath), backup, entry.OriginalHash!);
         }
         journal.Entries = entries.Values.ToList();
         Validate(journal);
@@ -112,7 +117,7 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
     public void Activate(SessionJournal journal)
     {
         Validate(journal);
-        if (journal.SchemaVersion != 2) throw new InvalidDataException("Legacy sessions support recovery only.");
+        if (journal.SchemaVersion != 3) throw new InvalidDataException("Legacy sessions support recovery only.");
         // Keep the original executable available until every other modded file is installed.
         foreach (var entry in journal.Entries.OrderBy(e => Is(e, RetailExecutable) ? 2 : Is(e, "version.dll") ? 1 : 0))
             ActivateEntry(journal, entry);
@@ -123,6 +128,8 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
         checkpoint?.Invoke("before-activate:" + entry.RelativePath);
         string destination = FileOps.SafePath(root, entry.RelativePath);
         CheckHash(destination, entry.OriginalHash);
+        // Transactional checks still read all bytes. Retire the old stamp before writes/moves.
+        verification?.Invalidate(destination);
         if (entry.Action == FileAction.Replace)
             FileOps.CopyVerified(FileOps.SafePath(Cache, entry.PreparedSource!), destination, entry.PreparedHash!);
         else if (entry.Action == FileAction.Park && entry.OriginalHash != null)
@@ -168,6 +175,9 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
                 if (result.Success)
                 {
                     checkpoint?.Invoke("journal-cleared");
+                    // Final full verification recorded stamps for the restored originals,
+                    // including files recreated through temporary copies and atomic moves.
+                    verification?.Save();
                     log?.Invoke("Original game files restored and verified.");
                 }
             }
@@ -223,12 +233,15 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
         string? expectedActive = entry.Action == FileAction.Park ? null : entry.PreparedHash;
         if (!FileOps.HashEquals(current, expectedActive))
             throw new InvalidDataException("Unexpected file contents (possibly a Steam update); refusing to overwrite them.");
+        verification?.Invalidate(destination);
         if (entry.OriginalHash == null)
         {
             if (Is(entry, "version.dll"))
             {
                 // Image sections can prevent deletion after exit. A neutral name is dormant immediately.
-                string dormant = FileOps.SafePath(Cache, $"sessions/{journal.Id}/parked/bootstrap.bin");
+                string dormant = FileOps.SafePath(Cache, journal.SchemaVersion >= 3
+                    ? $"{CacheLayout.SessionFolder(journal.Id)}/version.dll.disabled"
+                    : $"sessions/{journal.Id}/parked/bootstrap.bin");
                 Directory.CreateDirectory(Path.GetDirectoryName(dormant)!);
                 File.Move(destination, dormant);
                 try { File.Delete(dormant); }
@@ -253,7 +266,7 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
 
     private void Validate(SessionJournal journal)
     {
-        if (journal.SchemaVersion is not (1 or 2) || !Guid.TryParseExact(journal.Id, "N", out _) || string.IsNullOrWhiteSpace(journal.GameDirectory) || journal.Entries == null ||
+        if (journal.SchemaVersion is not (1 or 2 or 3) || !Guid.TryParseExact(journal.Id, "N", out _) || string.IsNullOrWhiteSpace(journal.GameDirectory) || journal.Entries == null ||
             !string.Equals(Path.GetFullPath(journal.GameDirectory), root, StringComparison.OrdinalIgnoreCase) || journal.Entries.Count == 0)
             throw new InvalidDataException("Invalid recovery journal; retain backups and verify the game in Steam.");
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -267,7 +280,9 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
             ValidateHash(entry.PreparedHash);
             if (entry.OriginalHash != null)
             {
-                if (entry.BackupPath != $"originals/{entry.OriginalHash.ToUpperInvariant()}.bin") throw new InvalidDataException("Invalid backup location.");
+                string expected = journal.SchemaVersion >= 3 ? CacheLayout.OriginalFile(rel, entry.OriginalHash)
+                    : $"originals/{entry.OriginalHash.ToUpperInvariant()}.bin";
+                if (entry.BackupPath != expected) throw new InvalidDataException("Invalid backup location.");
                 _ = FileOps.SafePath(Cache, entry.BackupPath);
             }
             if (entry.Action == FileAction.Replace)
@@ -279,7 +294,9 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
                 throw new InvalidDataException("Only replacement records may identify prepared outputs.");
             if (entry.Action == FileAction.Park)
             {
-                string? expected = Is(entry, "SL-AC.dll") ? (journal.SchemaVersion == 1 ? $"sessions/{journal.Id}/parked/SL-AC.dll.disabled" : $"sessions/{journal.Id}/parked/anticheat.bin") : null;
+                string? expected = !Is(entry, "SL-AC.dll") ? null : journal.SchemaVersion >= 3
+                    ? $"{CacheLayout.SessionFolder(journal.Id)}/SL-AC.dll.original"
+                    : journal.SchemaVersion == 1 ? $"sessions/{journal.Id}/parked/SL-AC.dll.disabled" : $"sessions/{journal.Id}/parked/anticheat.bin";
                 if (expected == null || entry.ParkedPath != expected) throw new InvalidDataException("Invalid parked file record.");
                 _ = FileOps.SafePath(Cache, expected);
             }
@@ -292,7 +309,7 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
             ("UnityPlayer.dll", FileAction.Observe, true), ("SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", FileAction.Observe, true),
             ("SL-AC.dll", FileAction.Park, false), ("version.dll", FileAction.Replace, false)
         };
-        if (journal.SchemaVersion == 2)
+        if (journal.SchemaVersion >= 2)
         {
             mandatory.Add((UnityBundleVersion.RelativePath, FileAction.Replace, true));
         }
@@ -310,7 +327,18 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
     {
         ValidateHash(prepared.BootstrapHash);
         if (prepared.BootstrapHash == null) throw new InvalidDataException("The prepared bootstrap identity is missing.");
-        string archivePath = FileOps.SafePath(Cache, Path.GetRelativePath(Cache, prepared.MelonLoaderArchive));
+        bool selectedArchive = prepared.BootstrapArchive != null || prepared.BootstrapArchiveSha256 != null;
+        if (selectedArchive && (string.IsNullOrWhiteSpace(prepared.BootstrapArchive) || string.IsNullOrWhiteSpace(prepared.BootstrapArchiveSha256)))
+            throw new InvalidDataException("The selected native bootstrap archive and SHA-256 must be supplied together.");
+        string archivePath = FileOps.SafePath(Cache, Path.GetRelativePath(Cache, selectedArchive ? prepared.BootstrapArchive! : prepared.MelonLoaderArchive));
+        if (selectedArchive)
+        {
+            ValidateHash(prepared.BootstrapArchiveSha256);
+            // The selected native archive is checked fully at every transaction, independently
+            // of the official runtime archive and the file verification cache.
+            if (!FileOps.HashEquals(FileOps.Hash(archivePath), prepared.BootstrapArchiveSha256))
+                throw new InvalidDataException("The selected native bootstrap archive does not match its SHA-256.");
+        }
         using var archive = ZipFile.OpenRead(archivePath);
         var matches = archive.Entries.Where(e => e.FullName.Replace('\\', '/').Equals("version.dll", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (matches.Length != 1 || matches[0].Length <= 0 || matches[0].Length > 64 * 1024 * 1024)
@@ -356,10 +384,12 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
         return value;
     }
 
-    private static void CheckHash(string path, string? expected)
+    private void CheckHash(string path, string? expected)
     {
         if (Directory.Exists(path)) throw new InvalidDataException($"A directory occupies a managed file path: {path}");
-        string? actual = File.Exists(path) ? FileOps.Hash(path) : null;
+        // Never use metadata reuse for backup, activation, restoration or deletion decisions.
+        string? actual = File.Exists(path) ? verification?.HashFresh(path) ?? FileOps.Hash(path) : null;
+        if (actual is null) verification?.Invalidate(path);
         if (!FileOps.HashEquals(actual, expected)) throw new InvalidDataException($"File identity changed or is missing: {path}");
     }
 }

@@ -14,7 +14,7 @@ public sealed record PatchAttempt(string Method, string Status, string? Detail =
 public sealed class PatchResult
 {
     public int SchemaVersion { get; set; } = 1;
-    public string AdapterVersion { get; set; } = "0.1.0";
+    public string AdapterVersion { get; set; } = "0.2.0";
     public string GameVersion { get; set; } = "";
     public string UnityVersion { get; set; } = "";
     public string PatchRevision { get; set; } = "";
@@ -33,8 +33,13 @@ public sealed class PreparedSession
     public string UnityVersion { get; set; } = "";
     public string DotnetRoot { get; set; } = "";
     public string AdapterDirectory { get; set; } = "";
+    public string? PatchEngine { get; set; }
+    public string? AdapterFingerprint { get; set; }
     public string MelonLoaderArchive { get; set; } = "";
     public string BootstrapHash { get; set; } = "";
+    // Optional launch-only native bootstrap selection; the official runtime archive stays separate.
+    public string? BootstrapArchive { get; set; }
+    public string? BootstrapArchiveSha256 { get; set; }
     public List<FileIdentity> Inputs { get; set; } = [];
     public List<PreparedFile> Files { get; set; } = [];
     public List<PreparedFile> RuntimeFiles { get; set; } = [];

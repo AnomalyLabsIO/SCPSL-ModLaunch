@@ -33,7 +33,7 @@ public sealed class MappedBootstrapTests
             Assert.True(restored.Success, string.Join(Environment.NewLine, restored.Failures));
             Assert.False(File.Exists(activePath));
             Assert.Null(transaction.LoadPending());
-            string parked = Assert.Single(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch", "sessions", journal.Id, "parked"), "bootstrap.bin"));
+            string parked = Assert.Single(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch", "temporary", "session-" + journal.Id), "version.dll.disabled"));
             Assert.Equal(expectedHash, FileOps.Hash(parked));
             foreach (var (name, original) in game.Originals)
                 Assert.Equal(original, File.ReadAllBytes(Path.Combine(game.Root, name)));

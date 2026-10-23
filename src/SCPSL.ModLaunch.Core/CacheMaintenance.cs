@@ -8,12 +8,11 @@ public static class CacheMaintenance
     public static void BeforePreparation(string root, Action<string>? log = null)
     {
         string cache = RequireIdle(root);
-        // Older releases retained active-looking bootstrap names inside private caches.
-        // Preserve their bytes while making them harmless, including failed staging work.
+        CacheLayout.Upgrade(root, log);
         foreach (string file in FilesBelow(cache).Where(x => Path.GetFileName(x).Equals("version.dll", StringComparison.OrdinalIgnoreCase)))
         {
             string hash = FileOps.Hash(file);
-            string parked = file + "." + hash[..12] + ".bin";
+            string parked = file + "." + hash[..12] + ".disabled";
             FileOps.RejectLink(parked);
             if (File.Exists(parked))
             {
@@ -24,76 +23,83 @@ public static class CacheMaintenance
             log?.Invoke("Disabled an idle cached loader payload: " + Path.GetRelativePath(cache, file));
         }
         CleanCompletedSessions(root, log);
-        if (DirectoriesBelow(cache, "sessions").Count() >= 2)
-            throw new IOException("Previous loader payloads are still in use. Close the processes holding those files and retry; ModLaunch will not accumulate more retired copies.");
-        // Keep the most recent failed preparation for diagnosis until another succeeds.
-        foreach (string directory in DirectoriesBelow(cache, "work").OrderByDescending(Directory.GetLastWriteTimeUtc).Skip(1)) TryDeleteTree(cache, directory, log);
+        if (SessionDirectories(cache).Count() >= 2)
+            throw new IOException("Previous loader payloads are still in use. Close the processes holding those files and retry.");
+        foreach (string directory in DirectoriesBelow(cache, CacheLayout.Temporary).OrderByDescending(Directory.GetLastWriteTimeUtc).Skip(1))
+            TryDeleteTree(cache, directory, log);
         TrimFiles(cache, "logs", 20, "*.log", log);
     }
 
     public static void AfterSuccessfulPreparation(string root, PreparedSession prepared, Action<string>? log = null)
     {
         string cache = RequireIdle(root);
-        string current = Path.GetFullPath(prepared.PreparedDirectory);
-        string generations = FileOps.SafePath(cache, "prepared");
-        if (!current.StartsWith(generations + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Prepared payloads are outside the managed cache.");
-        foreach (string directory in DirectoriesBelow(cache, "prepared"))
-            if (!current.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) TryDeleteTree(cache, directory, log);
-        foreach (string directory in DirectoriesBelow(cache, "work")) TryDeleteTree(cache, directory, log);
-        foreach (string directory in DirectoriesBelow(cache, "tools"))
+        CacheLayout.Upgrade(root, log);
+        string current = FileOps.SafePath(cache, CacheLayout.ModdedFiles);
+        if (!Path.GetFullPath(prepared.PreparedDirectory).Equals(current, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Prepared game files are outside the managed cache.");
+        foreach (string directory in DirectoriesBelow(cache, "prepared")) TryDeleteTree(cache, directory, log);
+        foreach (string directory in DirectoriesBelow(cache, CacheLayout.Temporary)) TryDeleteTree(cache, directory, log);
+        foreach (string directory in DirectoriesBelow(cache, CacheLayout.Tools))
         {
             string name = Path.GetFileName(directory);
-            if (name.StartsWith("melonloader-", StringComparison.OrdinalIgnoreCase) || name.Contains(".invalid-", StringComparison.Ordinal) || name.EndsWith(".staging", StringComparison.Ordinal))
-                TryDeleteTree(cache, directory, log);
-            else if (name.StartsWith("dotnet-", StringComparison.OrdinalIgnoreCase) && !IsUnder(prepared.DotnetRoot, directory) && !IsUnder(RuntimeEnvironment.GetRuntimeDirectory(), directory))
-                TryDeleteTree(cache, directory, log);
-        }
-        if (!string.IsNullOrWhiteSpace(prepared.AdapterDirectory))
-        {
-            foreach (string directory in DirectoriesBelow(cache, "tools"))
+            bool unused = name.StartsWith("downloaded-", StringComparison.Ordinal) &&
+                !Path.GetFullPath(directory).Equals(Path.GetFullPath(prepared.AdapterDirectory.Length == 0 ? current : prepared.AdapterDirectory), StringComparison.OrdinalIgnoreCase);
+            if (name.StartsWith("melonloader-", StringComparison.OrdinalIgnoreCase) || name.Contains(".invalid-", StringComparison.Ordinal) ||
+                name.EndsWith(".staging", StringComparison.Ordinal) || unused ||
+                name.StartsWith("dotnet-", StringComparison.OrdinalIgnoreCase) && !IsUnder(prepared.DotnetRoot, directory) && !IsUnder(RuntimeEnvironment.GetRuntimeDirectory(), directory))
             {
-                string name = Path.GetFileName(directory);
-                if (!name.StartsWith("adapter-", StringComparison.Ordinal) || name.Length != 72 || !name[8..].All(Uri.IsHexDigit) ||
-                    Path.GetFullPath(directory).Equals(Path.GetFullPath(prepared.AdapterDirectory), StringComparison.OrdinalIgnoreCase)) continue;
                 TryDeleteTree(cache, directory, log);
-                TryDeleteFile(cache, FileOps.SafePath(cache, "downloads/" + name + ".zip"), log);
+                if (unused) TryDeleteFile(cache, FileOps.SafePath(cache, "downloads/SCPSL-ModLaunch-patching-tools-" + name[11..] + ".zip"), log);
             }
         }
-        if (!IsUnder(prepared.DotnetRoot, cache))
-        {
-            string downloads = FileOps.SafePath(cache, "downloads");
-            if (Directory.Exists(downloads))
-                foreach (string zip in Directory.EnumerateFiles(downloads, "dotnet-runtime-*-win-x64.zip")) TryDeleteFile(cache, zip, log);
-        }
-        string downloadRoot = FileOps.SafePath(cache, "downloads");
-        if (Directory.Exists(downloadRoot))
+        string downloads = FileOps.SafePath(cache, "downloads");
+        if (Directory.Exists(downloads))
         {
             string? adapterName = string.IsNullOrWhiteSpace(prepared.AdapterDirectory) ? null : Path.GetFileName(prepared.AdapterDirectory.TrimEnd(Path.DirectorySeparatorChar));
-            foreach (string path in FilesBelow(downloadRoot))
+            string? currentArchive = adapterName?.StartsWith("downloaded-", StringComparison.Ordinal) == true
+                ? "SCPSL-ModLaunch-patching-tools-" + adapterName[11..] + ".zip" : null;
+            foreach (string path in FilesBelow(downloads))
             {
                 string name = Path.GetFileName(path);
-                bool orphanAdapter = Path.GetDirectoryName(path) == downloadRoot && name.StartsWith("adapter-", StringComparison.Ordinal) &&
-                    name.EndsWith(".zip", StringComparison.Ordinal) && name.Length == 76 && name[8..^4].All(Uri.IsHexDigit) && name != adapterName + ".zip";
-                if (orphanAdapter || name.EndsWith(".part", StringComparison.Ordinal) || name.EndsWith(".tmp", StringComparison.Ordinal)) TryDeleteFile(cache, path, log);
+                bool orphanAdapter = Path.GetDirectoryName(path) == downloads &&
+                    name.StartsWith("SCPSL-ModLaunch-patching-tools-", StringComparison.Ordinal) && name.EndsWith(".zip", StringComparison.Ordinal) && name != currentArchive;
+                if (orphanAdapter || name.EndsWith(".part", StringComparison.Ordinal) || name.EndsWith(".tmp", StringComparison.Ordinal))
+                    TryDeleteFile(cache, path, log);
             }
-            string dependencies = FileOps.SafePath(cache, "downloads/adapter-dependencies");
-            if (Directory.Exists(dependencies))
-                foreach (string file in Directory.EnumerateFiles(dependencies, "*.bin").Where(x => Path.GetFileNameWithoutExtension(x).Length == 64 && Path.GetFileNameWithoutExtension(x).All(Uri.IsHexDigit))
-                             .OrderByDescending(File.GetLastWriteTimeUtc).Skip(8))
-                {
-                    TryDeleteFile(cache, file, log);
-                    TryDeleteFile(cache, file + ".sha256", log);
-                }
+            if (!IsUnder(prepared.DotnetRoot, cache))
+                foreach (string zip in Directory.EnumerateFiles(downloads, "dotnet-runtime-*-win-x64.zip")) TryDeleteFile(cache, zip, log);
+            foreach (string file in Directory.EnumerateFiles(downloads, "*.bin").Where(x => Path.GetFileNameWithoutExtension(x).Length == 64 && Path.GetFileNameWithoutExtension(x).All(Uri.IsHexDigit)))
+            {
+                TryDeleteFile(cache, file, log);
+                TryDeleteFile(cache, file + ".sha256", log);
+            }
+            foreach (string sidecar in Directory.EnumerateFiles(downloads, "*.sha256").Where(x => File.Exists(x[..^7]))
+                         .OrderByDescending(x => File.GetLastWriteTimeUtc(x[..^7])).Skip(8))
+            {
+                TryDeleteFile(cache, sidecar[..^7], log);
+                TryDeleteFile(cache, sidecar, log);
+            }
         }
-        foreach (string directory in DirectoriesBelow(cache, "resources").OrderByDescending(Directory.GetLastWriteTimeUtc).Skip(2)) TryDeleteTree(cache, directory, log);
+        string oldDownloads = FileOps.SafePath(cache, "downloads/adapter-dependencies");
+        if (Directory.Exists(oldDownloads)) TryDeleteTree(cache, oldDownloads, log);
+        foreach (string directory in DirectoriesBelow(cache, "downloads/patch-definitions").OrderByDescending(Directory.GetLastWriteTimeUtc).Skip(2))
+            TryDeleteTree(cache, directory, log);
+        foreach (string empty in new[] { "prepared", "sessions", CacheLayout.Temporary })
+            DeleteEmpty(FileOps.SafePath(cache, empty));
         BeforePreparation(root, log);
     }
 
     public static void CleanCompletedSessions(string root, Action<string>? log = null)
     {
         string cache = RequireIdle(root);
-        foreach (string directory in DirectoriesBelow(cache, "sessions")) TryDeleteTree(cache, directory, log);
+        foreach (string directory in SessionDirectories(cache)) TryDeleteTree(cache, directory, log);
+        DeleteEmpty(FileOps.SafePath(cache, "sessions"));
+        DeleteEmpty(FileOps.SafePath(cache, CacheLayout.Temporary));
     }
+
+    private static IEnumerable<string> SessionDirectories(string cache) =>
+        DirectoriesBelow(cache, "sessions").Concat(DirectoriesBelow(cache, CacheLayout.Temporary)
+            .Where(x => Path.GetFileName(x).StartsWith("session-", StringComparison.Ordinal)));
 
     private static string RequireIdle(string root)
     {

@@ -20,7 +20,7 @@ public sealed class BundledAdapterInstallationTests
         Assert.Equal("new", File.ReadAllText(Path.Combine(target, "SCPSL-ModLaunch.ModPatch.Headless.exe")));
         Assert.False(File.Exists(Path.Combine(target, "removed.dll")));
         Assert.Equal("new dependency", File.ReadAllText(Path.Combine(target, "nested", "added.dll")));
-        Assert.Equal("old dependency", File.ReadAllText(Path.Combine(cache, "tools", "adapter-bundled.invalid-previous", "removed.dll")));
+        Assert.Equal("old dependency", File.ReadAllText(Path.Combine(cache, "patching-tools", "bundled.invalid-previous", "removed.dll")));
     }
 
     [Fact]
@@ -36,7 +36,7 @@ public sealed class BundledAdapterInstallationTests
         archive.Position = 0;
         BundledAdapterInstallation.Install(cache, archive);
         Assert.Equal(timestamp, File.GetLastWriteTimeUtc(executable));
-        Assert.Single(Directory.GetDirectories(Path.Combine(cache, "tools")));
+        Assert.Single(Directory.GetDirectories(Path.Combine(cache, CacheLayout.Tools)));
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public sealed class BundledAdapterInstallationTests
         archive.Position = 0;
         BundledAdapterInstallation.Install(cache, archive);
         Assert.False(File.Exists(Path.Combine(target, "unlisted.dll")));
-        Assert.Equal("stale", File.ReadAllText(Path.Combine(cache, "tools", "adapter-bundled.invalid-previous", "unlisted.dll")));
+        Assert.Equal("stale", File.ReadAllText(Path.Combine(cache, "patching-tools", "bundled.invalid-previous", "unlisted.dll")));
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class BundledAdapterInstallationTests
     {
         using var game = new TestGame();
         string cache = Cache(game);
-        string target = Path.Combine(cache, "tools", "adapter-bundled");
+        string target = Path.Combine(cache, "patching-tools", "bundled");
         Directory.CreateDirectory(target);
         File.WriteAllText(Path.Combine(target, "SCPSL-ModLaunch.ModPatch.Headless.exe"), "legacy");
         File.WriteAllText(Path.Combine(target, "removed.dll"), "legacy dependency");
@@ -128,7 +128,7 @@ public sealed class BundledAdapterInstallationTests
         using var invalid = Bundle(("SCPSL-ModLaunch.ModPatch.Headless.exe", "new"), (invalidPath, "invalid"));
         Assert.Throws<InvalidDataException>(() => BundledAdapterInstallation.Install(cache, invalid));
         Assert.Equal("old", File.ReadAllText(Path.Combine(target, "SCPSL-ModLaunch.ModPatch.Headless.exe")));
-        Assert.Single(Directory.GetDirectories(Path.Combine(cache, "tools")));
+        Assert.Single(Directory.GetDirectories(Path.Combine(cache, CacheLayout.Tools)));
         Assert.False(File.Exists(Path.Combine(game.Root, "outside.dll")));
     }
 

@@ -171,7 +171,7 @@ public sealed class LauncherUpdater : IDisposable
             if (!Matches(actualTarget, processHash)) throw new IOException("The running launcher's file changed; the update was not installed.");
             if (pending.Target is not null && !string.Equals(actualTarget, Target(pending.Target), StringComparison.OrdinalIgnoreCase))
                 throw new IOException("The interrupted update belongs to a different launcher location.");
-            string backup = FileOps.SafePath(updates, "previous-" + processHash + ".bin");
+            string backup = FileOps.SafePath(updates, "SCPSL-ModLaunch.previous-" + processHash + ".exe.disabled");
             if (File.Exists(backup))
             {
                 if (!Matches(backup, processHash)) throw new IOException("The launcher update backup changed unexpectedly.");
@@ -223,16 +223,26 @@ public sealed class LauncherUpdater : IDisposable
         return FileOps.SafePath(root, relative);
     }
 
-    private string Payload(string digest) => FileOps.SafePath(updates, "launcher-" + digest.ToUpperInvariant() + ".bin");
+    private string Payload(string digest)
+    {
+        string path = FileOps.SafePath(updates, "SCPSL-ModLaunch.update-" + digest.ToUpperInvariant() + ".exe.download");
+        string previous = FileOps.SafePath(updates, "launcher-" + digest.ToUpperInvariant() + ".bin");
+        if (!File.Exists(path) && Matches(previous, digest)) File.Move(previous, path);
+        return path;
+    }
     private static bool Matches(string path, string hash) { FileOps.RejectLink(path); return File.Exists(path) && FileOps.HashEquals(FileOps.Hash(path), hash); }
 
     private void CleanRetiredFiles()
     {
         if (!Directory.Exists(updates)) return;
-        foreach (string path in Directory.EnumerateFiles(updates, "*.bin"))
+        foreach (string path in Directory.EnumerateFiles(updates))
         {
             string name = Path.GetFileNameWithoutExtension(path);
             string? hash = name.StartsWith("previous-", StringComparison.Ordinal) ? name[9..] : name.StartsWith("launcher-", StringComparison.Ordinal) ? name[9..] : null;
+            string filename = Path.GetFileName(path);
+            foreach (var pattern in new[] { ("SCPSL-ModLaunch.previous-", ".exe.disabled"), ("SCPSL-ModLaunch.update-", ".exe.download") })
+                if (filename.StartsWith(pattern.Item1, StringComparison.Ordinal) && filename.EndsWith(pattern.Item2, StringComparison.Ordinal))
+                    hash = filename[pattern.Item1.Length..^pattern.Item2.Length];
             if (!ArtifactCache.IsHash(hash)) continue;
             try { if (Matches(FileOps.SafePath(updates, Path.GetFileName(path)), hash!)) File.Delete(path); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* An older process may still have its backup open. */ }

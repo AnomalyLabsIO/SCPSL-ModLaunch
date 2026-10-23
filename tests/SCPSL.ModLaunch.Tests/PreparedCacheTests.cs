@@ -11,6 +11,17 @@ namespace SCPSL.ModLaunch.Tests;
 public sealed class PreparedCacheTests
 {
     [Fact]
+    public void CachedParserMetadataCannotBeReusedAsARuntimeOutput()
+    {
+        using var cache = new CachedPreparation();
+        string source = "parser-metadata.bin";
+        string path = Path.Combine(cache.Session.PreparedDirectory, source);
+        File.WriteAllText(path, "parser-only v31 metadata");
+        cache.Session.Files.Add(new PreparedFile(SessionTransaction.RuntimeMetadataPath, FileOps.Hash(path), source));
+        Assert.False(cache.Validate());
+    }
+
+    [Fact]
     public void CompleteCacheIsAcceptedButChangedGameContentsInvalidateIt()
     {
         using var cache = new CachedPreparation();
@@ -127,7 +138,7 @@ public sealed class PreparedCacheTests
         public string GameRoot => game.Root;
         public PreparedSession Session { get; }
         private string CacheDirectory => Path.Combine(game.Root, ".modlaunch");
-        private string PreparedDirectory => Path.Combine(CacheDirectory, "prepared", Session.Fingerprint);
+        private string PreparedDirectory => Path.Combine(CacheDirectory, CacheLayout.ModdedFiles);
         private string InputKey { get; }
         private string ArchiveHash { get; }
 
@@ -135,17 +146,17 @@ public sealed class PreparedCacheTests
         {
             Session = new PreparedSession
             {
-                LayoutVersion = 2,
+                LayoutVersion = 3,
                 Fingerprint = new string('A', 64),
                 GameVersion = "14.2.7",
                 DotnetRoot = Path.Combine(game.Root, "host-dotnet"),
                 MelonLoaderArchive = Path.Combine(CacheDirectory, "downloads", "MelonLoader-0.7.3.x64.zip"),
                 Inputs = game.Originals.Keys.Select(name => new FileIdentity(name, FileOps.Hash(Path.Combine(game.Root, name)))).ToList()
             };
-            Session.PreparedDirectory = Path.Combine(PreparedDirectory, "payloads");
+            Session.PreparedDirectory = PreparedDirectory;
             InputKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(Session.Inputs, JsonDefaults.Options))));
             foreach (var path in new[] { "SCPSL.exe", "GameAssembly.dll", UnityBundleVersion.RelativePath })
-                Session.Files.Add(WriteFixture(Session.PreparedDirectory, path, $"{Session.Files.Count:D3}.bin"));
+                Session.Files.Add(WriteFixture(Session.PreparedDirectory, path, CacheLayout.ModdedFile(path)));
             string stage = Path.Combine(game.Root, "runtime-stage");
             foreach (var path in new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll", "MelonLoader/net6/MelonLoader.runtimeconfig.json", "MelonLoader/net6/MelonLoader.deps.json", RuntimeInstallation.GeneratorConfig })
                 Session.RuntimeFiles.Add(WriteFixture(stage, path));

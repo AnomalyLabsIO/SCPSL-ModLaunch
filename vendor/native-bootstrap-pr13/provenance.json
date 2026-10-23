@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "component": "MelonLoader 0.7.3 Windows x64 native bootstrap with upstream BepInEx/Dobby PR13",
+  "binary": {
+    "name": "version.dll",
+    "length": 11058688,
+    "sha256": "18B6DA09BB8976F0036AEAE428F21D95E2C222420A17C8B985AF4B6D59551BF0",
+    "releaseInput": "vendor/native-bootstrap-pr13/version.dll"
+  },
+  "embeddedResource": {
+    "archive": "native-bootstrap-pr13.zip",
+    "entry": "version.dll",
+    "provenance": "native-bootstrap-pr13.provenance.json",
+    "format": "ordinary ZIP; optimal compression; fixed 1980-01-01T00:00:00+00:00 entry timestamp"
+  },
+  "melonLoader": {
+    "repository": "https://github.com/LavaGang/MelonLoader.git",
+    "version": "0.7.3",
+    "commit": "982ed9981ac5b0619648a2e79bcc02fd8861db33",
+    "sourceTree": "7252e944d5bfdfdab6263223b24344a3df5f6c0a",
+    "sourceChanges": false,
+    "license": "Apache-2.0"
+  },
+  "dobby": {
+    "repository": "https://github.com/BepInEx/Dobby.git",
+    "pullRequest": "https://github.com/BepInEx/Dobby/pull/13",
+    "baseCommit": "9d271803881f467aabfc24593c7dcaeb710fe861",
+    "pullRequestHead": "490d7581cb61d960c0a185c2b70ade30a59cd377",
+    "qualifiedMergeCommit": "128308e1b85da55adc82159d89ff6569d293738a",
+    "sourceTree": "c454abd66d009a035a23ebc42a0f0fd45b4e8721",
+    "customSourceChanges": false,
+    "license": "Apache-2.0",
+    "staticLibrarySha256": "E50B7D9D0BE68DC171FCD445D01B221922E5A012727C2CFD4184D91AE0817BA2"
+  },
+  "build": {
+    "coordinator": "../MelonLoader.NativeBackend",
+    "sourceLock": "source-lock.json",
+    "script": "tooling/Build-Pr13Bootstrap.ps1",
+    "override": "tooling/Use-DobbyLibrary.targets",
+    "librarySubstitution": "External NativeLibrary override before SetupOSSpecificProps; original stock library excluded from actual linker response.",
+    "managedRuntimeChanges": false,
+    "interopChanges": false,
+    "productionApi": "Stock legacy NativeHookAttach/NativeHookDetach; no checked or fixture exports",
+    "packagingDefault": "Tracked ordinary vendor/native-bootstrap-pr13/version.dll; packaging is self-contained from a complete checkout.",
+    "rebuildInstructions": "Reconstruct source-lock.json in the sibling MelonLoader.NativeBackend coordinator, build the upstream PR13 static library, then tooling/Build-Pr13Bootstrap.ps1; see README.md in this directory."
+  },
+  "qualification": {
+    "upstreamRelocationAddressCasesPassed": 160,
+    "sharedExecutionChildrenPassed": 80,
+    "productionExecutionChildrenPassed": 80,
+    "executionScope": "Both captured setter versions, all four bool transitions each; all sixteen short conditional jump conditions taken and untaken; fresh controls and hooked children.",
+    "integrationNote": "docs/NATIVE_BOOTSTRAP_PR13_QUALIFICATION.md",
+    "buildReceipt": "../MelonLoader.NativeBackend/artifacts/pr13-bootstrap-20261018/build-receipt.json",
+    "executionReceipt": "../MelonLoader.NativeBackend/artifacts/pr13-bootstrap-20261018/qualification/receipt.json"
+  },
+  "distribution": "Retain source pins, notices and licenses. The launcher embeds this ordinary ZIP and explicit provenance; this component changes only the native bootstrap. Game files and generated game assemblies are not included."
+}

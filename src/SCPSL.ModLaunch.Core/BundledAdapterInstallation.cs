@@ -12,13 +12,13 @@ public static class BundledAdapterInstallation
     private const long FileLimit = 64L * 1024 * 1024;
     private const long ExpandedLimit = 128L * 1024 * 1024;
 
-    public static string Install(string cache, Stream archive, Action<string>? checkpoint = null)
+    public static string Install(string cache, Stream archive, Action<string>? checkpoint = null, FileVerificationCache? verification = null)
     {
         cache = Path.GetFullPath(cache);
         if (File.Exists(FileOps.SafePath(cache, "session.json")))
             throw new InvalidOperationException("The bundled adapter cannot change while a recovery journal exists.");
-        string target = FileOps.SafePath(cache, "tools/adapter-bundled");
-        string previous = FileOps.SafePath(cache, "tools/adapter-bundled.invalid-previous");
+        string target = FileOps.SafePath(cache, "patching-tools/bundled");
+        string previous = FileOps.SafePath(cache, "patching-tools/bundled.invalid-previous");
         if (File.Exists(target) || File.Exists(previous)) throw new InvalidDataException("A file occupies a bundled-adapter directory path.");
         // Both directory moves are atomic on the game volume. If termination occurred between
         // them, first reinstate the retained complete installation before considering an update.
@@ -32,10 +32,10 @@ public static class BundledAdapterInstallation
         string archiveHash = Convert.ToHexString(SHA256.HashData(bytes.GetBuffer().AsSpan(0, checked((int)bytes.Length))));
         bytes.Position = 0;
         using var zip = new ZipArchive(bytes, ZipArchiveMode.Read, leaveOpen: true);
-        string stage = FileOps.SafePath(cache, "tools/ab-" + Guid.NewGuid().ToString("N")[..8] + ".staging");
+        string stage = FileOps.SafePath(cache, "temporary/patching-tools-" + Guid.NewGuid().ToString("N")[..8] + ".staging");
         var entries = Validate(zip, stage);
         var expectedFiles = entries.Select(e => new PreparedFile(e.Relative, HashEntry(e.Entry))).ToArray();
-        if (Matches(target, archiveHash, expectedFiles)) return target;
+        if (Matches(target, archiveHash, expectedFiles, verification)) return target;
 
         Directory.CreateDirectory(stage);
         var files = new List<PreparedFile>();
@@ -52,6 +52,8 @@ public static class BundledAdapterInstallation
             files.Add(new PreparedFile(relative, FileOps.Hash(destination)));
         }
         FileOps.WriteJson(FileOps.SafePath(stage, ManifestName), new BundleManifest(1, archiveHash, files));
+        // Newly extracted files always receive full content verification, even when the
+        // existing installation can reuse previously verified metadata.
         if (!Matches(stage, archiveHash, expectedFiles)) throw new InvalidDataException("The extracted bundled adapter failed validation.");
         checkpoint?.Invoke("bundle-staged");
 
@@ -59,9 +61,10 @@ public static class BundledAdapterInstallation
         _ = FilesBelow(target);
         _ = FilesBelow(previous);
         if (Directory.Exists(previous))
-            Directory.Move(previous, FileOps.SafePath(cache, "tools/adapter-bundled.invalid-" + Guid.NewGuid().ToString("N")));
+            Directory.Move(previous, FileOps.SafePath(cache, "patching-tools/bundled.invalid-" + Guid.NewGuid().ToString("N")));
         if (Directory.Exists(target)) Directory.Move(target, previous);
         checkpoint?.Invoke("bundle-retired");
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         try { Directory.Move(stage, target); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -160,7 +163,7 @@ public static class BundledAdapterInstallation
         return Convert.ToHexString(hash.GetHashAndReset());
     }
 
-    private static bool Matches(string directory, string archiveHash, IReadOnlyCollection<PreparedFile> expectedFiles)
+    private static bool Matches(string directory, string archiveHash, IReadOnlyCollection<PreparedFile> expectedFiles, FileVerificationCache? verification = null)
     {
         if (!Directory.Exists(directory)) return false;
         var expected = expectedFiles.ToDictionary(f => f.RelativePath, StringComparer.Ordinal);
@@ -175,7 +178,8 @@ public static class BundledAdapterInstallation
             {
                 if (file == null || file.RelativePath == null || !seen.Add(file.RelativePath) || !expected.TryGetValue(file.RelativePath, out var expectedFile) ||
                     !FileOps.HashEquals(file.Sha256, expectedFile.Sha256)) return false;
-                if (!FileOps.HashEquals(FileOps.Hash(FileOps.SafePath(directory, file.RelativePath)), file.Sha256)) return false;
+                string path = FileOps.SafePath(directory, file.RelativePath);
+                if (!(verification?.Matches(path, file.Sha256) ?? FileOps.HashEquals(FileOps.Hash(path), file.Sha256))) return false;
             }
             return true;
         }

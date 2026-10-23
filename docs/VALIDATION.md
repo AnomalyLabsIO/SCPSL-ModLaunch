@@ -8,7 +8,11 @@ The .NET 6 test suite covers transactional restoration and interruption checkpoi
 
 ## Packaged tool checks
 
-The release should contain `SCPSL-ModLaunch.exe`, the `SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip` companion, and the full `SCPSL-ModLaunch-win-x64.zip`, with SHA-256 sidecars. The full ZIP includes documentation and licenses. The bundled and standalone adapter must use the same executable identity. Native Windows checks should verify root-to-`.modlaunch` relocation, the actual `SCPSL-ModLaunch.lnk` target, installed recovery-only invocation, and preserved originals. Published tags must match the embedded executable versions; the updater consumes the standalone EXE.
+The release should contain `SCPSL-ModLaunch.exe`, the `SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip` companion, `SCPSL-ModPatch.Cli-sources.zip`, and the full `SCPSL-ModLaunch-win-x64.zip`, with SHA-256 sidecars. The full ZIP includes documentation and licenses. The bundled and standalone adapter must use the same executable identity. Native Windows checks should verify root-to-`.modlaunch` relocation, the actual `SCPSL-ModLaunch.lnk` target, installed recovery-only invocation, and preserved originals. Published tags must match the embedded executable versions; the updater consumes the standalone EXE.
+
+## Fork CLI integration: 2026-10-18
+
+The fork's CLI and new pattern manifest replace ModLaunch's duplicated patch engine. Staged 14.2.7 and 14.2.8 checks cover cold Cpp2IL/Interop generation, repeat/offline cache reuse, activation, and byte-identical restoration. All three prepared game outputs also match the previous engine's verified outputs for each fixture. See [MODPATCH_FORK_QUALIFICATION.md](MODPATCH_FORK_QUALIFICATION.md) for identities, results, and the gameplay qualification boundary.
 
 ## Current updater package: 2026-09-25
 

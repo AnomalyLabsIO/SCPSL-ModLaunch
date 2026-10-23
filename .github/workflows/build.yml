@@ -70,6 +70,8 @@ jobs:
             'SCPSL-ModLaunch.exe.sha256',
             'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip',
             'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip.sha256',
+            'SCPSL-ModPatch.Cli-sources.zip',
+            'SCPSL-ModPatch.Cli-sources.zip.sha256',
             'SCPSL-ModLaunch-win-x64.zip',
             'SCPSL-ModLaunch-win-x64.zip.sha256'
           ) | ForEach-Object { Join-Path 'release' $_ }
