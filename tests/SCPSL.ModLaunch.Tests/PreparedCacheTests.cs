@@ -32,7 +32,7 @@ public sealed class PreparedCacheTests
 
     [Theory]
     [InlineData("SCPSL.exe")]
-    [InlineData(UnityBundleVersion.RelativePath)]
+    [InlineData(GameFileContract.BundleVersionPath)]
     public void OmittedRequiredOutputsCannotBeHiddenByTruncatingTheManifest(string missing)
     {
         using var cache = new CachedPreparation();
@@ -49,13 +49,31 @@ public sealed class PreparedCacheTests
     }
 
     [Fact]
-    public void StaleBundleVersionCannotBeReusedEvenWhenItsHashMatchesTheManifest()
+    public void ChangedBundlePayloadCannotBeReusedWhenItsManifestHashNoLongerMatchesTheVerifiedCorrection()
     {
         using var cache = new CachedPreparation();
-        string path = cache.PayloadPath(UnityBundleVersion.RelativePath);
+        string path = cache.PayloadPath(GameFileContract.BundleVersionPath);
         File.WriteAllBytes(path, TestGame.BundleBytes("14.1.0"));
-        int index = cache.Session.Files.FindIndex(f => f.RelativePath == UnityBundleVersion.RelativePath);
+        int index = cache.Session.Files.FindIndex(f => f.RelativePath == GameFileContract.BundleVersionPath);
         cache.Session.Files[index] = cache.Session.Files[index] with { Sha256 = FileOps.Hash(path) };
+        Assert.False(cache.Validate());
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("wrong-version")]
+    [InlineData("wrong-status")]
+    [InlineData("wrong-hash")]
+    public void CacheRequiresTheVerifiedModPatchBundleVersionOutcome(string condition)
+    {
+        using var cache = new CachedPreparation();
+        cache.Session.BundleVersion = condition switch
+        {
+            "missing" => null,
+            "wrong-version" => cache.Session.BundleVersion! with { After = "14.1.0" },
+            "wrong-status" => cache.Session.BundleVersion! with { Status = "already-correct" },
+            _ => cache.Session.BundleVersion! with { Sha256 = new string('F', 64) }
+        };
         Assert.False(cache.Validate());
     }
 
@@ -182,7 +200,7 @@ public sealed class PreparedCacheTests
 
     [Theory]
     [InlineData("GameAssembly.dll")]
-    [InlineData(UnityBundleVersion.RelativePath)]
+    [InlineData(GameFileContract.BundleVersionPath)]
     public void PatchOnlyCacheStillRejectsChangedGamePayloads(string relative)
     {
         using var cache = new CachedPreparation(skipMelonLoader: true);
@@ -214,8 +232,10 @@ public sealed class PreparedCacheTests
             };
             Session.PreparedDirectory = PreparedDirectory;
             InputKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(Session.Inputs, JsonDefaults.Options))));
-            foreach (var path in new[] { "SCPSL.exe", "GameAssembly.dll", UnityBundleVersion.RelativePath })
+            foreach (var path in new[] { "SCPSL.exe", "GameAssembly.dll", GameFileContract.BundleVersionPath })
                 Session.Files.Add(WriteFixture(Session.PreparedDirectory, path, CacheLayout.ModdedFile(path)));
+            Session.BundleVersion = new BundleVersionCorrection("14.1.0", Session.GameVersion, "applied",
+                Session.Files.Single(file => file.RelativePath == GameFileContract.BundleVersionPath).Sha256);
             HostRuntimeTests.WriteRuntime(Session.DotnetRoot, "6.0.36");
             if (skipMelonLoader) return;
             string stage = Path.Combine(game.Root, "runtime-stage");
@@ -233,7 +253,7 @@ public sealed class PreparedCacheTests
         {
             string path = Path.Combine(root, source ?? relative);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            if (relative == UnityBundleVersion.RelativePath) File.WriteAllBytes(path, TestGame.BundleBytes("14.2.7"));
+            if (relative == GameFileContract.BundleVersionPath) File.WriteAllBytes(path, TestGame.BundleBytes("14.2.7"));
             else if (relative == RuntimeInstallation.GeneratorConfig) File.WriteAllText(path, "[Il2CppAssemblyGenerator]\n");
             else File.WriteAllText(path, "validated fixture " + relative);
             return new PreparedFile(relative, FileOps.Hash(path), source);

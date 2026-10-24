@@ -19,8 +19,8 @@ internal sealed class TestGame : IDisposable
         foreach (var name in new[] { "Mods/user.dll", "Plugins/plugin.dll", "UserData/user.cfg", "UserLibs/library.dll" })
             Write(name, System.Text.Encoding.UTF8.GetBytes("user owned " + name));
         byte[] bundle = BundleBytes("14.1.0");
-        Write(UnityBundleVersion.RelativePath, bundle);
-        Originals.Add(UnityBundleVersion.RelativePath, bundle);
+        Write(GameFileContract.BundleVersionPath, bundle);
+        Originals.Add(GameFileContract.BundleVersionPath, bundle);
     }
 
     public PreparedSession Prepare()
@@ -46,7 +46,8 @@ internal sealed class TestGame : IDisposable
         string bundlePath = Path.Combine(Stage, bundleSource);
         Directory.CreateDirectory(Path.GetDirectoryName(bundlePath)!);
         File.WriteAllBytes(bundlePath, BundleBytes(session.GameVersion));
-        session.Files.Add(new PreparedFile(UnityBundleVersion.RelativePath, FileOps.Hash(bundlePath), bundleSource));
+        session.Files.Add(new PreparedFile(GameFileContract.BundleVersionPath, FileOps.Hash(bundlePath), bundleSource));
+        session.BundleVersion = new BundleVersionCorrection("14.1.0", session.GameVersion, "applied", FileOps.Hash(bundlePath));
         string runtimeSource = "runtime.bin";
         File.WriteAllText(Path.Combine(Stage, runtimeSource), "prepared fixture MelonLoader/net6/MelonLoader.dll");
         session.RuntimeFiles.Add(new PreparedFile("MelonLoader/net6/MelonLoader.dll", FileOps.Hash(Path.Combine(Stage, runtimeSource)), runtimeSource));

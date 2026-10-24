@@ -3,32 +3,42 @@ using System.Text.RegularExpressions;
 
 namespace SCPSL.ModLaunch.Core;
 
-/// <summary>Identity and inputs of the separately built MIT ModPatch CLI.</summary>
+/// <summary>Identity and inputs of the MIT ModPatch .NET 6 compatibility package.</summary>
 public sealed class ModPatchBundle
 {
     public const string Repository = "AnomalyLabsIO/SCPSL-ModPatch";
-    public const string Executable = "SCPSL.ModPatch.Cli.exe";
+    public const string Executable = "SCPSL ModPatch.exe";
     public const string Manifest = "patchinfo.json";
+    public const string BundleVersionCapability = "bundle-version-correction";
     public int SchemaVersion { get; set; }
     public string SourceRepository { get; set; } = "";
     public string SourceRevision { get; set; } = "";
     public string SourceSha256 { get; set; } = "";
+    public string TargetFramework { get; set; } = "";
+    public string RuntimeIdentifier { get; set; } = "";
+    public string EntryPoint { get; set; } = "";
+    public bool? SelfContained { get; set; }
+    public bool SingleFile { get; set; }
+    public List<string> Capabilities { get; set; } = [];
     public List<PreparedFile> Files { get; set; } = [];
 
     public static ModPatchBundle Read(string directory)
     {
         var bundle = FileOps.ReadJson<ModPatchBundle>(FileOps.SafePath(directory, "bundle.json"));
-        if (bundle.SchemaVersion != 1 || bundle.SourceRepository != Repository ||
-            !IsHash(bundle.SourceRevision, 40) || !IsHash(bundle.SourceSha256, 64))
-            throw new InvalidDataException("The ModPatch CLI bundle has an unsupported identity.");
+        if (bundle.SchemaVersion != 2 || bundle.SourceRepository != Repository ||
+            !IsHash(bundle.SourceRevision, 40) || !IsHash(bundle.SourceSha256, 64) ||
+            bundle.TargetFramework != "net6.0-windows" || bundle.RuntimeIdentifier != "win-x64" ||
+            bundle.EntryPoint != Executable || bundle.SelfContained != false || !bundle.SingleFile ||
+            bundle.Capabilities is null || !bundle.Capabilities.Contains(BundleVersionCapability, StringComparer.Ordinal))
+            throw new InvalidDataException("The ModPatch .NET 6 bundle has an unsupported identity.");
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in bundle.Files)
             if (!paths.Add(file.RelativePath) || !IsHash(file.Sha256, 64) ||
                 !File.Exists(FileOps.SafePath(directory, file.RelativePath)) ||
                 !FileOps.Hash(FileOps.SafePath(directory, file.RelativePath)).Equals(file.Sha256, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException($"The ModPatch CLI bundle is incomplete or changed: {file.RelativePath}.");
+                throw new InvalidDataException($"The ModPatch .NET 6 bundle is incomplete or changed: {file.RelativePath}.");
         if (!paths.Contains(Executable) || !paths.Contains(Manifest))
-            throw new InvalidDataException("The ModPatch CLI or pattern manifest is missing from the bundle.");
+            throw new InvalidDataException("The ModPatch executable or pattern manifest is missing from the bundle.");
         return bundle;
     }
 
@@ -58,6 +68,10 @@ public sealed class ModPatchBundle
         foreach (var node in ranges)
         {
             var profile = node?.AsObject() ?? throw new InvalidDataException("Invalid pattern target.");
+            // The canonical manifest also contains Mono profiles. Preserve their order
+            // and contents: ModPatch reports indices into this complete manifest.
+            if (profile["backend"] is JsonValue backend && backend.TryGetValue<string>(out var backendName) &&
+                backendName.Equals("mono", StringComparison.OrdinalIgnoreCase)) continue;
             string launcher = LauncherPath(profile["cleanLauncherPath"]?.GetValue<string>() ?? "");
             // The fork retains upstream launcher paths in its source manifest. Resolve assets
             // from the same fork revision as the feed; never follow mutable embedded URLs.

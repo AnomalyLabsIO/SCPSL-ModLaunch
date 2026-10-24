@@ -17,7 +17,7 @@ public sealed class SessionTransactionTests
         transaction.Activate(journal);
 
         Assert.Equal("prepared fixture SCPSL.exe", File.ReadAllText(Path.Combine(game.Root, "SCPSL.exe")));
-        Assert.Equal("14.2.7", UnityBundleVersion.Read(Path.Combine(game.Root, UnityBundleVersion.RelativePath)));
+        Assert.Equal(TestGame.BundleBytes("14.2.7"), File.ReadAllBytes(Path.Combine(game.Root, GameFileContract.BundleVersionPath)));
         Assert.False(File.Exists(Path.Combine(game.Root, "SL-AC.dll")));
         Assert.True(File.Exists(Path.Combine(game.Root, "version.dll")));
         game.Write("MelonLoader/Il2CppAssemblies/Assembly-CSharp.dll", [1, 2, 3]);
@@ -111,7 +111,7 @@ public sealed class SessionTransactionTests
 
     public static IEnumerable<object[]> RestoreCheckpoints() => ManagedPaths().SelectMany(path => new[] { new object[] { "before-restore:" + path }, new object[] { "after-restore:" + path } });
 
-    private static string[] ManagedPaths() => ["SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", UnityBundleVersion.RelativePath, "SL-AC.dll", "version.dll"];
+    private static string[] ManagedPaths() => ["SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", GameFileContract.BundleVersionPath, "SL-AC.dll", "version.dll"];
 
     [Theory]
     [MemberData(nameof(RestoreCheckpoints))]
@@ -154,7 +154,7 @@ public sealed class SessionTransactionTests
                 Assert.Equal(game.Originals["SCPSL.exe"], File.ReadAllBytes(Path.Combine(game.Root, "SCPSL.exe")));
                 Assert.True(File.Exists(Path.Combine(game.Root, "version.dll")));
                 Assert.False(File.Exists(Path.Combine(game.Root, "SL-AC.dll")));
-                Assert.Equal("14.2.7", UnityBundleVersion.Read(Path.Combine(game.Root, UnityBundleVersion.RelativePath)));
+                Assert.Equal(TestGame.BundleBytes("14.2.7"), File.ReadAllBytes(Path.Combine(game.Root, GameFileContract.BundleVersionPath)));
             }
             if (point == "before-restore:SCPSL.exe")
             {
@@ -221,7 +221,7 @@ public sealed class SessionTransactionTests
         var transaction = new SessionTransaction(game.Root);
         var journal = transaction.Create(game.Prepare());
         journal.SchemaVersion = schema;
-        if (schema == 1) journal.Entries.RemoveAll(e => e.RelativePath == UnityBundleVersion.RelativePath);
+        if (schema == 1) journal.Entries.RemoveAll(e => e.RelativePath == GameFileContract.BundleVersionPath);
         var ac = journal.Entries.Single(e => e.RelativePath == "SL-AC.dll");
         ac.ParkedPath = schema == 1 ? $"sessions/{journal.Id}/parked/SL-AC.dll.disabled" : $"sessions/{journal.Id}/parked/anticheat.bin";
         string cache = Path.Combine(game.Root, ".modlaunch");
@@ -253,7 +253,7 @@ public sealed class SessionTransactionTests
 
     [Theory]
     [InlineData("GameAssembly.dll")]
-    [InlineData(UnityBundleVersion.RelativePath)]
+    [InlineData(GameFileContract.BundleVersionPath)]
     public void RestoreDisablesLoaderButDoesNotOverwriteExternalChanges(string changedPath)
     {
         using var game = new TestGame();
@@ -277,14 +277,14 @@ public sealed class SessionTransactionTests
         using var game = new TestGame();
         var prepared = game.Prepare();
         byte[] corrected = TestGame.BundleBytes("14.2.7");
-        game.Write(UnityBundleVersion.RelativePath, corrected);
-        int input = prepared.Inputs.FindIndex(f => f.RelativePath == UnityBundleVersion.RelativePath);
-        prepared.Inputs[input] = new FileIdentity(UnityBundleVersion.RelativePath, FileOps.Hash(Path.Combine(game.Root, UnityBundleVersion.RelativePath)));
+        game.Write(GameFileContract.BundleVersionPath, corrected);
+        int input = prepared.Inputs.FindIndex(f => f.RelativePath == GameFileContract.BundleVersionPath);
+        prepared.Inputs[input] = new FileIdentity(GameFileContract.BundleVersionPath, FileOps.Hash(Path.Combine(game.Root, GameFileContract.BundleVersionPath)));
         var transaction = new SessionTransaction(game.Root);
         var journal = transaction.Create(prepared);
         transaction.Activate(journal);
         Assert.True(transaction.Restore(journal).Success);
-        Assert.Equal(corrected, File.ReadAllBytes(Path.Combine(game.Root, UnityBundleVersion.RelativePath)));
+        Assert.Equal(corrected, File.ReadAllBytes(Path.Combine(game.Root, GameFileContract.BundleVersionPath)));
     }
 
     [Fact]

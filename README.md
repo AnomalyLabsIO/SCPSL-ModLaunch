@@ -1,6 +1,6 @@
 # SCPSL-ModLaunch
 
-A lightweight launcher that prepares **SCP: Secret Laboratory** for modded play and restores the original game files when it closes by default. It runs the CLI from [our SCPSL-ModPatch fork](https://github.com/AnomalyLabsIO/SCPSL-ModPatch), using its pattern manifest, and installs **MelonLoader 0.7.3**. It uses your installed game and leaves mod selection to you.
+A lightweight launcher that prepares **SCP: Secret Laboratory** for modded play and restores the original game files when it closes by default. It runs [our SCPSL-ModPatch fork](https://github.com/AnomalyLabsIO/SCPSL-ModPatch) in command line mode, using its .NET 6 compatibility build and pattern manifest, and installs **MelonLoader 0.7.3**. It uses your installed game and leaves mod selection to you.
 
 *Based on [SCPSL-ModPatch by hopperlopip / LostFire](https://github.com/hopperlopip/SCPSL-ModPatch). Not affiliated with MelonLoader or Northwood Studios.*
 
@@ -8,7 +8,7 @@ A lightweight launcher that prepares **SCP: Secret Laboratory** for modded play 
 
 - An installed Windows x64 copy of SCP:SL, with no conflicting mod loader.
   - Linux/Proton should also work, but is not yet confirmed.
-- **Windows x64 .NET 6 Runtime**, preferably 6.0.36.
+- **Windows x64 .NET 6 Desktop Runtime 6.0.36 or later**. ModPatch requires the Desktop Runtime even when it runs in command line mode; a newer major .NET runtime alone does not satisfy this requirement.
 - Internet access for initial preparation and updates.
 
 ## Install and launch
@@ -17,7 +17,7 @@ For a first time install:
 1. Download the latest release from [GitHub](https://github.com/AnomalyLabsIO/SCPSL-ModLaunch/releases).
 2. Preferably, create a copy of your game directory for modded play.
 3. Place `SCPSL-ModLaunch.exe` beside `SCPSL.exe` in the desired game directory.
-4. Run `SCPSL-ModLaunch.exe`. It will check for preparation-tool updates, install MelonLoader, and prepare the game. A verified copy of the ModPatch CLI and pattern resources is bundled. The first run may take a couple minutes.
+4. Run `SCPSL-ModLaunch.exe`. It will check for preparation-tool updates, install MelonLoader, and prepare the game. A verified copy of ModPatch's .NET 6 build and pattern resources is bundled. The first run may take a couple minutes.
 5. After the game launches, quit the game normally. The launcher restores the original game files and exits.
 
 The launcher will leave a shortcut in the game directory named **SCPSL-ModLaunch.lnk**. Use that shortcut for future modded sessions. *SCP:SL's anti-cheat will block vanilla play if the exe is in the game root directory.*
@@ -110,8 +110,10 @@ SCPSL-ModLaunch.lnk
 
 ## Building and updating ModPatch
 
-`./scripts/package.ps1` tests and builds the launcher using the pinned CLI archives in `vendor/ModPatch/`. It does not need a sibling ModPatch checkout. The release output includes the CLI's exact source archive and SHA-256 sidecars.
+`./scripts/package.ps1` tests and builds the launcher using the pinned `SCPSL.ModPatch.dotnet6.0.zip` and matching source archive in `vendor/ModPatch/`. It does not need a sibling ModPatch checkout. The release output includes the exact `SCPSL.ModPatch.sources.<hash>.zip` source archive and SHA-256 sidecars. The bundled `SCPSL ModPatch.exe` is the fork's single executable for both GUI and command line use; ModLaunch passes command line arguments to run preparation without opening its GUI.
 
-To import a changed fork, run `./scripts/import-modpatch.ps1 -SourceRoot ../SCPSL-ModPatch`, then run the normal packaging script. Both scripts accept `-NuGetSource` for an offline package source. Review the resulting archive hashes and rerun fixture qualification before distributing a new engine. Engine changes need a rebuilt package; compatible pattern definitions can update independently.
+To import a changed fork, run `./scripts/import-modpatch.ps1 -SourceRoot ../SCPSL-ModPatch`, then run the normal packaging script. Importing invokes the fork's `scripts/package.ps1 -Package Compatibility` and requires PowerShell 7 and a .NET 10 SDK. Both ModLaunch scripts accept `-NuGetSource` for an offline package source. Review the resulting archive hashes and rerun fixture qualification before distributing a new engine. Engine changes need a rebuilt package; compatible pattern definitions can update independently.
 
-ModPatch owns version detection, parser selection, byte-pattern matching, patch application, and the JSON result. ModLaunch's preparation helper invokes that CLI and owns Unity's displayed bundle-version correction and MelonLoader assembly generation. Session activation, backups, and restoration remain in ModLaunch. See [ModPatch provenance](vendor/ModPatch/PROVENANCE.md).
+To import an existing compatibility release and its matching source archive, use `./scripts/import-modpatch.ps1 -PackageDirectory <release folder>`. This verifies both archives without rebuilding ModPatch.
+
+ModPatch owns version detection, parser selection, byte-pattern matching, patch application, Unity's displayed bundle-version correction, and the JSON result. ModLaunch's preparation helper invokes that CLI and verifies its outputs, then handles MelonLoader assembly generation. Session activation, backups, restoration, and temporary SL-AC relocation remain in ModLaunch. The `globalgamemanagers` original is backed up and restored with the other game files. See [ModPatch provenance](vendor/ModPatch/PROVENANCE.md).

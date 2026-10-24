@@ -61,7 +61,7 @@ public static class CacheLayout
         string originals = FileOps.SafePath(cache, "originals");
         if (!Directory.Exists(originals)) return;
         var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string relative in new[] { "SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SL-AC.dll", SessionTransaction.RuntimeMetadataPath, UnityBundleVersion.RelativePath })
+        foreach (string relative in new[] { "SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SL-AC.dll", SessionTransaction.RuntimeMetadataPath, GameFileContract.BundleVersionPath })
         {
             string path = FileOps.SafePath(root, relative);
             if (File.Exists(path)) names.TryAdd(FileOps.Hash(path), relative);

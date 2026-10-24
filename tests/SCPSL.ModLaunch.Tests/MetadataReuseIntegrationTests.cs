@@ -115,8 +115,10 @@ public sealed class MetadataReuseIntegrationTests
             };
             Session.PreparedDirectory = PreparedDirectory;
             InputKey = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(Session.Inputs, JsonDefaults.Options))));
-            foreach (string relative in new[] { "SCPSL.exe", "GameAssembly.dll", UnityBundleVersion.RelativePath })
+            foreach (string relative in new[] { "SCPSL.exe", "GameAssembly.dll", GameFileContract.BundleVersionPath })
                 Session.Files.Add(WriteFixture(Session.PreparedDirectory, relative, CacheLayout.ModdedFile(relative)));
+            Session.BundleVersion = new BundleVersionCorrection("14.1.0", Session.GameVersion, "applied",
+                Session.Files.Single(file => file.RelativePath == GameFileContract.BundleVersionPath).Sha256);
             string stage = Path.Combine(GameRoot, "runtime-stage");
             foreach (string relative in new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll",
                          "MelonLoader/net6/MelonLoader.runtimeconfig.json", "MelonLoader/net6/MelonLoader.deps.json" })
@@ -135,7 +137,7 @@ public sealed class MetadataReuseIntegrationTests
         {
             string path = Path.Combine(root, source ?? relative);
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            if (relative == UnityBundleVersion.RelativePath) File.WriteAllBytes(path, TestGame.BundleBytes("14.2.7"));
+            if (relative == GameFileContract.BundleVersionPath) File.WriteAllBytes(path, TestGame.BundleBytes("14.2.7"));
             else File.WriteAllText(path, "validated fixture " + relative);
             return new PreparedFile(relative, FileOps.Hash(path), source);
         }

@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 [CmdletBinding()]
 param(
     [ValidateSet('Debug', 'Release')][string]$Configuration = 'Release',
@@ -8,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'modpatch-package.ps1')
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $artifactRoot = Join-Path $projectRoot 'artifacts'
 $stageRoot = Join-Path $artifactRoot ('staging/' + [guid]::NewGuid().ToString('N'))
@@ -84,34 +86,11 @@ try {
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $modPatchVendor = Join-Path $projectRoot 'vendor/ModPatch'
-    $modPatchArchive = Join-Path $modPatchVendor 'SCPSL-ModPatch.Cli-win-x64.zip'
-    $modPatchSources = Join-Path $modPatchVendor 'SCPSL-ModPatch.Cli-sources.zip'
-    foreach ($archive in @($modPatchArchive,$modPatchSources)) {
-        $expected = ((Get-Content -LiteralPath ($archive+'.sha256') -Raw) -split '\s+')[0]
-        if ($expected -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expected) {
-            throw 'The pinned ModPatch package failed its checksum. Refresh it with scripts/import-modpatch.ps1.'
-        }
-    }
+    $modPatchPackage = Get-ModPatchPackage -Directory $modPatchVendor
+    $modPatchArchive = $modPatchPackage.ArchivePath
+    $modPatchSources = $modPatchPackage.SourcePath
     $modPatchStage = Join-Path $adapterStage 'ModPatch'
-    $modPatchZip = [IO.Compression.ZipFile]::OpenRead($modPatchArchive)
-    try {
-        $allowed = [IO.Path]::GetFullPath($modPatchStage) + [IO.Path]::DirectorySeparatorChar
-        foreach ($entry in $modPatchZip.Entries) {
-            $target = [IO.Path]::GetFullPath((Join-Path $modPatchStage $entry.FullName))
-            if (-not $target.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase)) { throw 'ModPatch archive path escaped its staging directory.' }
-        }
-    } finally { $modPatchZip.Dispose() }
     [IO.Compression.ZipFile]::ExtractToDirectory($modPatchArchive,$modPatchStage)
-    $modPatchIdentity = Get-Content -LiteralPath (Join-Path $modPatchStage 'bundle.json') -Raw | ConvertFrom-Json
-    if ($modPatchIdentity.sourceRepository -ne 'AnomalyLabsIO/SCPSL-ModPatch' -or
-        $modPatchIdentity.sourceSha256 -ne (Get-FileHash -LiteralPath $modPatchSources -Algorithm SHA256).Hash) {
-        throw 'ModPatch binary and source package identities disagree.'
-    }
-    foreach ($file in $modPatchIdentity.files) {
-        $target = [IO.Path]::GetFullPath((Join-Path $modPatchStage $file.relativePath))
-        if (-not $target.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase) -or
-            (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $file.sha256) { throw 'A bundled ModPatch file failed verification.' }
-    }
     $uniqueBundle = Join-Path $stageRoot 'adapter-bundled.zip'
     [IO.Compression.ZipFile]::CreateFromDirectory($adapterStage, $uniqueBundle, [IO.Compression.CompressionLevel]::Optimal, $false)
     Copy-Item -LiteralPath $uniqueBundle -Destination $bundlePath -Force
@@ -177,6 +156,13 @@ try {
     Copy-Item -LiteralPath $distribution -Destination $releaseStage
     $distributionHash = (Get-FileHash -LiteralPath $distribution -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $releaseStage ($distributionName + '.sha256')), "$distributionHash  $distributionName`n", [Text.UTF8Encoding]::new($false))
+    # Hash-named snapshots change on refresh; expose only the source matching this release.
+    Get-ChildItem -LiteralPath $releaseRoot -File | Where-Object {
+        $_.Name -like 'SCPSL-ModPatch.Cli-*.zip*' -or
+        ($_.Name -like 'SCPSL.ModPatch.sources.*.zip*' -and
+            $_.Name -ne [IO.Path]::GetFileName($modPatchSources) -and
+            $_.Name -ne ([IO.Path]::GetFileName($modPatchSources) + '.sha256'))
+    } | Remove-Item -Force
     Get-ChildItem -LiteralPath $releaseStage | Copy-Item -Destination $releaseRoot -Recurse -Force
     Write-Host "Release artifacts: $releaseRoot"
 }

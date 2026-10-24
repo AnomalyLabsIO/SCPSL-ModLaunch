@@ -25,6 +25,10 @@ public sealed class ForkPatchEngineTests
 
     private const string MixedManifest = """
         {"versionRanges":[
+        {"backend":"mono","version":"Open-Beta 2.0","methods":{"patchMethods":[]}},
+        {"backend":"mono","versionFrom":"5.0.0","versionTo":"8.0.1",
+        "methods":{"patchMethods":[{"name":"System.Void Fixture::Start()",
+        "ilPattern":[{"op":"ldc.i4.1"}],"ilEdit":{"operation":"replace","instructions":[{"op":"ldc.i4.0"}]}}]}},
         {"versionRange":"14.1.0 - Current","versionFrom":"14.1.0","versionTo":"Current",
         "cleanLauncherPath":"./clean_launchers/6000.0.43f1/SCPSL.exe","metadataVersion":31,
         "methods":{"patchMethods":[{"name":"Fixture$$Run","patchPattern":"48 83 EC ??","patchData":"[RET]"},
@@ -50,7 +54,8 @@ public sealed class ForkPatchEngineTests
         string revision = new('a', 40);
         var expected = JsonNode.Parse(MixedManifest)!;
         foreach (var profile in expected["versionRanges"]!.AsArray())
-            profile!["cleanLauncherUrl"] = $"https://raw.githubusercontent.com/{ModPatchBundle.Repository}/{revision}/Shared_Files/{ModPatchBundle.LauncherPath(profile["cleanLauncherPath"]!.GetValue<string>())}";
+            if (profile!["backend"]?.GetValue<string>() != "mono")
+                profile["cleanLauncherUrl"] = $"https://raw.githubusercontent.com/{ModPatchBundle.Repository}/{revision}/Shared_Files/{ModPatchBundle.LauncherPath(profile["cleanLauncherPath"]!.GetValue<string>())}";
         var document = ModPatchBundle.PinPatternManifest(MixedManifest, revision);
         Assert.Equal(expected.ToJsonString(), document.ToJsonString());
     }
@@ -73,7 +78,7 @@ public sealed class ForkPatchEngineTests
     }
 
     [Theory]
-    [InlineData("SCPSL.ModPatch.Cli.exe")]
+    [InlineData("SCPSL ModPatch.exe")]
     [InlineData("patchinfo.json")]
     public void CorruptBundledCodeOrManifestAreRejected(string relative)
     {
@@ -81,6 +86,36 @@ public sealed class ForkPatchEngineTests
         string root = CreateBundle(game.Root);
         _ = ModPatchBundle.Read(root);
         File.AppendAllText(Path.Combine(root, relative), "corrupt");
+        Assert.Throws<InvalidDataException>(() => ModPatchBundle.Read(root));
+    }
+
+    [Theory]
+    [InlineData("legacy-schema")]
+    [InlineData("standalone-framework")]
+    [InlineData("x86")]
+    [InlineData("legacy-entrypoint")]
+    [InlineData("self-contained")]
+    [InlineData("missing-self-contained")]
+    [InlineData("multiple-files")]
+    [InlineData("missing-bundle-correction")]
+    public void BundleRejectsPackagesOtherThanTheUnifiedNetSixBuild(string condition)
+    {
+        using var game = new TestGame();
+        string root = CreateBundle(game.Root);
+        string path = Path.Combine(root, "bundle.json");
+        var bundle = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        switch (condition)
+        {
+            case "legacy-schema": bundle["schemaVersion"] = 1; break;
+            case "standalone-framework": bundle["targetFramework"] = "net10.0-windows"; break;
+            case "x86": bundle["runtimeIdentifier"] = "win-x86"; break;
+            case "legacy-entrypoint": bundle["entryPoint"] = "SCPSL.ModPatch.Cli.exe"; break;
+            case "self-contained": bundle["selfContained"] = true; break;
+            case "missing-self-contained": bundle.Remove("selfContained"); break;
+            case "multiple-files": bundle["singleFile"] = false; break;
+            case "missing-bundle-correction": bundle.Remove("capabilities"); break;
+        }
+        File.WriteAllText(path, bundle.ToJsonString());
         Assert.Throws<InvalidDataException>(() => ModPatchBundle.Read(root));
     }
 
@@ -173,7 +208,7 @@ public sealed class ForkPatchEngineTests
     }
 
     [Theory]
-    [InlineData("SCPSL.ModPatch.Cli.exe")]
+    [InlineData("SCPSL ModPatch.exe")]
     [InlineData("patchinfo.json")]
     public async Task PublishedLegacyOffsetFeedRejectsChangedBundledResources(string relative)
     {
@@ -225,9 +260,10 @@ public sealed class ForkPatchEngineTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task PublishedLegacyAdapterUsesThePackagedForkEngine(bool patternBundle)
+    [InlineData("missing")]
+    [InlineData("legacy-pattern")]
+    [InlineData("unified-without-correction")]
+    public async Task PublishedAdapterWithoutModPatchCorrectionUsesThePackagedForkEngine(string contents)
     {
         using var game = new TestGame();
         string cache = Path.Combine(game.Root, ".modlaunch");
@@ -235,6 +271,11 @@ public sealed class ForkPatchEngineTests
         CreateBundle(bundled);
         string executable = Path.Combine(bundled, "SCPSL-ModLaunch.ModPatch.Headless.exe");
         File.WriteAllText(executable, "bundled helper; never executed");
+        string published = CreateBundle(Path.Combine(game.Root, "published"));
+        string publishedIdentityPath = Path.Combine(published, "bundle.json");
+        var publishedIdentity = FileOps.ReadJson<ModPatchBundle>(publishedIdentityPath);
+        publishedIdentity.Capabilities.Clear();
+        FileOps.WriteJson(publishedIdentityPath, publishedIdentity);
         byte[] archive;
         using (var stream = new MemoryStream())
         {
@@ -242,10 +283,16 @@ public sealed class ForkPatchEngineTests
             {
                 using (var writer = new StreamWriter(zip.CreateEntry("SCPSL-ModLaunch.ModPatch.Headless.exe").Open()))
                     writer.Write("legacy helper; never executed");
-                if (patternBundle)
+                if (contents == "legacy-pattern")
                     foreach (string relative in new[] { "ModPatch/bundle.json", "ModPatch/SCPSL.ModPatch.Cli.exe", "ModPatch/patchinfo.patterns.json" })
                         using (var writer = new StreamWriter(zip.CreateEntry(relative).Open()))
                             writer.Write("legacy pattern bundle; never executed");
+                else if (contents == "unified-without-correction")
+                    foreach (string fileName in new[] { "bundle.json", ModPatchBundle.Executable, ModPatchBundle.Manifest })
+                    {
+                        using var entryStream = zip.CreateEntry("ModPatch/" + fileName).Open();
+                        entryStream.Write(File.ReadAllBytes(Path.Combine(published, fileName)));
+                    }
             }
             archive = stream.ToArray();
         }
@@ -265,13 +312,38 @@ public sealed class ForkPatchEngineTests
     }
 
     [Fact]
-    public void CompleteForkReportVerifiesBothOutputsAndPreservesOtherInputs()
+    public void CompleteForkReportVerifiesAllThreeOutputsAndPreservesOtherInputs()
     {
         using var fixture = new ReportFixture();
         var result = fixture.Validate();
         Assert.Equal(new Version(14, 2, 8), result.GameVersion);
-        Assert.Equal("applied", Assert.Single(result.Patches).Status);
+        Assert.Equal("applied", Assert.Single(result.Patches.Where(patch => patch.Method == "Fixture$$Run")).Status);
+        Assert.Equal("applied", Assert.Single(result.Patches.Where(patch => patch.Method == GameFileContract.BundleVersionPatchName)).Status);
+        Assert.True(result.BundleVersion.Matches("14.2.8", FileOps.Hash(Path.Combine(fixture.Game.Root, GameFileContract.BundleVersionPath))));
         Assert.True(result.MetadataNormalizedForParser);
+    }
+
+    [Fact]
+    public void AlreadyCorrectBundleVersionRequiresNoReportedChangeAndKeepsItsOutputIdentity()
+    {
+        using var fixture = new ReportFixture(alreadyCorrect: true);
+        var result = fixture.Validate();
+        Assert.Equal("already-correct", result.BundleVersion.Status);
+        Assert.Equal(fixture.Originals[GameFileContract.BundleVersionPath], result.BundleVersion.Sha256);
+        Assert.Equal("already-correct", Assert.Single(result.Patches.Where(patch => patch.Method == GameFileContract.BundleVersionPatchName)).Status);
+    }
+
+    [Fact]
+    public void ForkReportUsesIndicesFromTheCompleteManifestIncludingMonoProfiles()
+    {
+        using var fixture = new ReportFixture();
+        var manifest = JsonNode.Parse(Manifest)!;
+        manifest["versionRanges"]!.AsArray().Insert(0, JsonNode.Parse(
+            """{"backend":"mono","version":"Open-Beta 2.0","methods":{"patchMethods":[]}}"""));
+        fixture.Report["profileIndex"] = 1;
+        Assert.Equal(new Version(14, 2, 8), fixture.Validate(manifest.ToJsonString()).GameVersion);
+        fixture.Report["profileIndex"] = 0;
+        Assert.Throws<InvalidDataException>(() => fixture.Validate(manifest.ToJsonString()));
     }
 
     [Theory]
@@ -287,6 +359,18 @@ public sealed class ForkPatchEngineTests
     [InlineData("wrong-hash")]
     [InlineData("metadata-write")]
     [InlineData("outside-path")]
+    [InlineData("bundle-mode")]
+    [InlineData("bundle-missing-mode")]
+    [InlineData("bundle-missing-result")]
+    [InlineData("bundle-relative-path")]
+    [InlineData("bundle-outside-path")]
+    [InlineData("bundle-invalid-before")]
+    [InlineData("bundle-wrong-after")]
+    [InlineData("bundle-wrong-status")]
+    [InlineData("bundle-unreported-change")]
+    [InlineData("bundle-wrong-before-hash")]
+    [InlineData("bundle-wrong-after-hash")]
+    [InlineData("bundle-unchanged-applied")]
     public void InvalidOrPartialForkResultsCannotBeActivated(string condition)
     {
         using var fixture = new ReportFixture();
@@ -305,6 +389,18 @@ public sealed class ForkPatchEngineTests
             case "wrong-hash": report["modifiedFiles"]![0]!["afterSha256"] = new string('f', 64); break;
             case "metadata-write": File.AppendAllText(Path.Combine(fixture.Game.Root, SessionTransaction.RuntimeMetadataPath), "changed"); break;
             case "outside-path": report["modifiedFiles"]![0]!["path"] = Path.Combine(fixture.Game.Root, "..", "other.exe"); break;
+            case "bundle-mode": report["bundleVersionMode"] = "preserve"; break;
+            case "bundle-missing-mode": report.Remove("bundleVersionMode"); break;
+            case "bundle-missing-result": report.Remove("bundleVersion"); break;
+            case "bundle-relative-path": report["bundleVersion"]!["path"] = GameFileContract.BundleVersionPath; break;
+            case "bundle-outside-path": report["bundleVersion"]!["path"] = Path.Combine(fixture.Game.Root, "outside"); break;
+            case "bundle-invalid-before": report["bundleVersion"]!["before"] = "unknown"; break;
+            case "bundle-wrong-after": report["bundleVersion"]!["after"] = "14.1.0"; break;
+            case "bundle-wrong-status": report["bundleVersion"]!["status"] = "already-correct"; break;
+            case "bundle-unreported-change": report["modifiedFiles"]!.AsArray().RemoveAt(2); break;
+            case "bundle-wrong-before-hash": report["modifiedFiles"]![2]!["beforeSha256"] = new string('F', 64); break;
+            case "bundle-wrong-after-hash": report["modifiedFiles"]![2]!["afterSha256"] = new string('F', 64); break;
+            case "bundle-unchanged-applied": fixture.Game.Write(GameFileContract.BundleVersionPath, fixture.Game.Originals[GameFileContract.BundleVersionPath]); break;
         }
         Assert.Throws<InvalidDataException>(() => fixture.Validate());
     }
@@ -327,12 +423,15 @@ public sealed class ForkPatchEngineTests
     {
         string root = Path.Combine(parent, "ModPatch");
         Directory.CreateDirectory(root);
-        File.WriteAllText(Path.Combine(root, ModPatchBundle.Executable), "mock CLI identity; never executed");
+        File.WriteAllText(Path.Combine(root, ModPatchBundle.Executable), "mock .NET 6 identity; never executed");
         File.WriteAllText(Path.Combine(root, ModPatchBundle.Manifest), manifest);
         FileOps.WriteJson(Path.Combine(root, "bundle.json"), new ModPatchBundle
         {
-            SchemaVersion = 1, SourceRepository = ModPatchBundle.Repository,
+            SchemaVersion = 2, SourceRepository = ModPatchBundle.Repository,
             SourceRevision = new string('a', 40), SourceSha256 = new string('b', 64),
+            TargetFramework = "net6.0-windows", RuntimeIdentifier = "win-x64", EntryPoint = ModPatchBundle.Executable,
+            SingleFile = true, SelfContained = false,
+            Capabilities = [ModPatchBundle.BundleVersionCapability],
             Files = [new PreparedFile(ModPatchBundle.Executable, FileOps.Hash(Path.Combine(root, ModPatchBundle.Executable))),
                 new PreparedFile(ModPatchBundle.Manifest, FileOps.Hash(Path.Combine(root, ModPatchBundle.Manifest)))]
         });
@@ -351,25 +450,32 @@ public sealed class ForkPatchEngineTests
         internal Dictionary<string, string> Originals { get; }
         internal string LauncherHash { get; }
         internal JsonObject Report { get; }
-        internal ReportFixture()
+        internal ReportFixture(bool alreadyCorrect = false)
         {
+            if (alreadyCorrect) Game.Write(GameFileContract.BundleVersionPath, TestGame.BundleBytes("14.2.8"));
             Originals = Game.Originals.Keys.ToDictionary(name => name, name => FileOps.Hash(Path.Combine(Game.Root, name)));
             foreach (string name in new[] { "SCPSL.exe", "GameAssembly.dll" }) File.AppendAllText(Path.Combine(Game.Root, name), "prepared");
+            if (!alreadyCorrect) Game.Write(GameFileContract.BundleVersionPath, TestGame.BundleBytes("14.2.8"));
             LauncherHash = FileOps.Hash(Path.Combine(Game.Root, "SCPSL.exe"));
             Report = JsonSerializer.SerializeToNode(new
             {
                 schemaVersion = 1, success = true, exitCode = 0, command = "patch", stage = "complete", error = (object?)null,
                 metadataMode = "preserve", metadataVersion = 31, metadataNormalizedForParser = true,
+                bundleVersionMode = "correct", bundleVersion = new
+                {
+                    path = Path.Combine(Game.Root, GameFileContract.BundleVersionPath), before = alreadyCorrect ? "14.2.8" : "14.1.0",
+                    after = "14.2.8", status = alreadyCorrect ? "already-correct" : "applied"
+                },
                 unityVersion = "6000.0.43f1", gameVersion = "14.2.8", profileIndex = 0, warnings = Array.Empty<string>(),
                 patches = new[] { new { name = "Fixture$$Run", status = "applied", message = "prepared" } },
-                modifiedFiles = new[] { "SCPSL.exe", "GameAssembly.dll" }.Select(name => new
+                modifiedFiles = (alreadyCorrect ? new[] { "SCPSL.exe", "GameAssembly.dll" } : new[] { "SCPSL.exe", "GameAssembly.dll", GameFileContract.BundleVersionPath }).Select(name => new
                 { path = Path.Combine(Game.Root, name), beforeSha256 = Originals[name], afterSha256 = FileOps.Hash(Path.Combine(Game.Root, name)) })
             })!.AsObject();
         }
-        internal ForkPatchEngine.Prepared Validate()
+        internal ForkPatchEngine.Prepared Validate(string manifestText = Manifest)
         {
             using var report = JsonDocument.Parse(Report.ToJsonString());
-            using var manifest = JsonDocument.Parse(Manifest);
+            using var manifest = JsonDocument.Parse(manifestText);
             return ForkPatchEngine.ValidateResult(report.RootElement, manifest.RootElement, Game.Root, "6000.0.43f1", LauncherHash, Originals);
         }
         public void Dispose() => Game.Dispose();

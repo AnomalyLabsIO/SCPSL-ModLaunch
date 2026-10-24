@@ -18,7 +18,7 @@ internal static class Program
             resultPath = Path.GetFullPath(Required(options, "--result"));
             result.PatchRevision = options.GetValueOrDefault("--patch-revision", "");
             ToolDownloads.CacheDirectory = Path.GetFullPath(options.GetValueOrDefault("--cache-dir", Path.Combine(staging, ".adapter-work", "downloads")));
-            foreach (string relative in new[] { "SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", UnityBundleVersion.RelativePath })
+            foreach (string relative in new[] { "SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", GameFileContract.BundleVersionPath })
                 RequireRegularFile(staging, relative);
             string metadataPath = Path.Combine(staging, "SCPSL_Data", "il2cpp_data", "Metadata", "global-metadata.dat");
             string originalMetadataHash = ToolDownloads.Hash(metadataPath);
@@ -27,13 +27,10 @@ internal static class Program
             result.GameVersion = gameVersion.ToString();
             result.UnityVersion = game.UnityVersion;
             result.Patches.AddRange(game.Patches);
+            result.BundleVersion = game.BundleVersion;
             Console.WriteLine($"Prepared SCP:SL {gameVersion}, Unity {game.UnityVersion} with the ModPatch pattern engine.");
-            string bundlePath = Path.Combine(staging, UnityBundleVersion.RelativePath);
-            string previousBundleVersion = UnityBundleVersion.Rewrite(bundlePath, gameVersion);
-            result.Patches.Add(new PatchAttempt(UnityBundleVersion.PatchName,
-                previousBundleVersion == result.GameVersion ? "already-correct" : "applied",
-                $"{previousBundleVersion} -> {result.GameVersion} in {UnityBundleVersion.RelativePath}"));
-            Console.WriteLine($"Unity bundle version: {previousBundleVersion} -> {result.GameVersion}.");
+            string bundlePath = Path.Combine(staging, GameFileContract.BundleVersionPath);
+            Console.WriteLine($"ModPatch Unity bundle version: {game.BundleVersion.Before} -> {game.BundleVersion.After} ({game.BundleVersion.Status}).");
             if (game.MetadataNormalizedForParser && !skipMelonLoader)
             {
                 Console.WriteLine("Runtime metadata requires a parser-only normalization; generating compatible MelonLoader assemblies.");
@@ -44,7 +41,7 @@ internal static class Program
                 throw new InvalidDataException("Runtime metadata changed unexpectedly; staging is invalid.");
             result.Files.Add(new PreparedFile("SCPSL.exe", ToolDownloads.Hash(Path.Combine(staging, "SCPSL.exe"))));
             result.Files.Add(new PreparedFile("GameAssembly.dll", ToolDownloads.Hash(Path.Combine(staging, "GameAssembly.dll"))));
-            result.Files.Add(new PreparedFile(UnityBundleVersion.RelativePath, ToolDownloads.Hash(bundlePath)));
+            result.Files.Add(new PreparedFile(GameFileContract.BundleVersionPath, ToolDownloads.Hash(bundlePath)));
             Directory.CreateDirectory(Path.GetDirectoryName(resultPath)!);
             await File.WriteAllTextAsync(resultPath, JsonSerializer.Serialize(result, JsonDefaults.Options));
             Console.WriteLine($"Preparation complete: {result.Files.Count} output files; runtime metadata unchanged.");

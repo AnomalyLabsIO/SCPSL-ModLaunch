@@ -10,7 +10,7 @@ namespace SCPSL.ModLaunch.ModPatch.Headless;
 internal static class ForkPatchEngine
 {
     internal sealed record Prepared(Version GameVersion, string UnityVersion, int MetadataVersion,
-        bool MetadataNormalizedForParser, IReadOnlyList<PatchAttempt> Patches);
+        bool MetadataNormalizedForParser, BundleVersionCorrection BundleVersion, IReadOnlyList<PatchAttempt> Patches);
 
     internal static async Task<Prepared> PrepareAsync(string stage, string manifestPath, string revision)
     {
@@ -19,13 +19,14 @@ internal static class ForkPatchEngine
         using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
         string unity = ReadUnityVersion(Path.Combine(stage, "UnityPlayer.dll"));
         var targets = manifest.RootElement.GetProperty("versionRanges").EnumerateArray().ToArray();
-        var launcherPaths = targets.Select(profile => ModPatchBundle.LauncherPath(profile.GetProperty("cleanLauncherPath").GetString()!))
+        var launcherPaths = targets.Where(IsIl2CppProfile)
+            .Select(profile => ModPatchBundle.LauncherPath(profile.GetProperty("cleanLauncherPath").GetString()!))
             .Where(path => path.Split('/')[1] == unity).Distinct(StringComparer.Ordinal).ToArray();
         if (launcherPaths.Length != 1) throw new InvalidDataException($"No unambiguous clean launcher for Unity {unity} in the pattern manifest.");
         string launcher;
         if (revision.StartsWith("bundled-", StringComparison.Ordinal))
         {
-            string relative = Path.ChangeExtension(launcherPaths[0], ".bin").Replace('\\', '/');
+            string relative = launcherPaths[0];
             if (!bundle.Files.Any(file => file.RelativePath == relative))
                 throw new InvalidDataException($"The bundled pattern resources lack a clean launcher for Unity {unity}.");
             launcher = FileOps.SafePath(root, relative);
@@ -37,7 +38,7 @@ internal static class ForkPatchEngine
         }
         ValidateCleanLauncher(launcher);
         string launcherHash = FileOps.Hash(launcher);
-        var originals = new[] { "SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", UnityBundleVersion.RelativePath }
+        var originals = new[] { "SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", GameFileContract.BundleVersionPath }
             .ToDictionary(path => path, path => FileOps.Hash(FileOps.SafePath(stage, path)), StringComparer.OrdinalIgnoreCase);
         if (launcherHash.Equals(originals["SCPSL.exe"], StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("SCPSL.exe already matches the clean launcher. Verify original game files in Steam before preparation.");
@@ -47,7 +48,7 @@ internal static class ForkPatchEngine
         Console.WriteLine($"Using {ModPatchBundle.Repository}, source {bundle.SourceSha256}, pattern resources {revision}.");
         await ToolRunner.RunAsync(FileOps.SafePath(root, ModPatchBundle.Executable),
             ["patch", "--game-dir", stage, "--patch-info", manifestPath, "--clean-launcher", launcher,
-             "--metadata-mode", "preserve", "--result", reportPath], stage, runtime.DotnetRoot,
+             "--metadata-mode", "preserve", "--bundle-version-mode", "correct", "--result", reportPath], stage, runtime.DotnetRoot,
             Console.WriteLine, TimeSpan.FromMinutes(10), CancellationToken.None);
         using var report = JsonDocument.Parse(File.ReadAllBytes(reportPath));
         return ValidateResult(report.RootElement, manifest.RootElement, stage, unity, launcherHash, originals);
@@ -64,11 +65,29 @@ internal static class ForkPatchEngine
             throw new InvalidDataException("ModPatch returned an incomplete, incompatible, or unsuccessful result.");
         if (!Version.TryParse(report.GetProperty("gameVersion").GetString(), out var version) || version.Build < 0 || version.Revision >= 0)
             throw new InvalidDataException("ModPatch did not identify a numeric game version.");
+        if (ReadString(report, "bundleVersionMode") != "correct" ||
+            !report.TryGetProperty("bundleVersion", out var bundleReport) || bundleReport.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException("ModPatch did not report the required Unity bundle-version correction.");
+        string bundlePath = FileOps.SafePath(stage, GameFileContract.BundleVersionPath);
+        string? reportedBundlePath = ReadString(bundleReport, "path");
+        string? beforeBundleVersion = ReadString(bundleReport, "before");
+        string? afterBundleVersion = ReadString(bundleReport, "after");
+        string? bundleStatus = ReadString(bundleReport, "status");
+        if (string.IsNullOrWhiteSpace(reportedBundlePath) || !Path.IsPathFullyQualified(reportedBundlePath) ||
+            !bundlePath.Equals(Path.GetFullPath(reportedBundlePath), StringComparison.OrdinalIgnoreCase) ||
+            beforeBundleVersion is null || afterBundleVersion is null || bundleStatus is null)
+            throw new InvalidDataException("ModPatch returned an invalid Unity bundle-version correction.");
+        string bundleHash = FileOps.Hash(bundlePath);
+        var bundleVersion = new BundleVersionCorrection(beforeBundleVersion, afterBundleVersion, bundleStatus, bundleHash);
+        bool bundleChanged = !bundleHash.Equals(originals[GameFileContract.BundleVersionPath], StringComparison.OrdinalIgnoreCase);
+        if (!bundleVersion.Matches(version.ToString(), bundleHash) || bundleChanged != (bundleStatus == "applied"))
+            throw new InvalidDataException("ModPatch's Unity bundle-version outcome does not match the detected version or file change.");
         var targets = manifest.GetProperty("versionRanges").EnumerateArray().ToArray();
         int index = report.GetProperty("profileIndex").GetInt32();
         if (index < 0 || index >= targets.Length) throw new InvalidDataException("ModPatch returned an invalid profile index.");
         var target = targets[index];
-        if (ModPatchBundle.LauncherPath(target.GetProperty("cleanLauncherPath").GetString()!).Split('/')[1] != unity ||
+        if (!IsIl2CppProfile(target) ||
+            ModPatchBundle.LauncherPath(target.GetProperty("cleanLauncherPath").GetString()!).Split('/')[1] != unity ||
             target.GetProperty("metadataVersion").GetInt32() != report.GetProperty("metadataVersion").GetInt32())
             throw new InvalidDataException("ModPatch selected a profile for another Unity or metadata version.");
         var definitions = target.GetProperty("methods").GetProperty("patchMethods").EnumerateArray().ToArray();
@@ -96,26 +115,39 @@ internal static class ForkPatchEngine
         {
             string absolute = Path.GetFullPath(file.GetProperty("path").GetString()!);
             string relative = Path.GetRelativePath(stage, absolute).Replace('\\', '/');
-            if (relative is not "SCPSL.exe" and not "GameAssembly.dll" || !changed.Add(relative) ||
+            if (relative is not "SCPSL.exe" and not "GameAssembly.dll" and not GameFileContract.BundleVersionPath || !changed.Add(relative) ||
                 !FileOps.SafePath(stage, relative).Equals(absolute, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(file.GetProperty("beforeSha256").GetString(), originals[relative], StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(file.GetProperty("afterSha256").GetString(), FileOps.Hash(absolute), StringComparison.OrdinalIgnoreCase))
+                !string.Equals(file.GetProperty("afterSha256").GetString(), FileOps.Hash(absolute), StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(file.GetProperty("beforeSha256").GetString(), file.GetProperty("afterSha256").GetString(), StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"ModPatch reported an unexpected or unverified file change: {relative}.");
         }
-        if (changed.Count != 2 || !FileOps.Hash(Path.Combine(stage, "SCPSL.exe")).Equals(launcherHash, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("ModPatch did not produce both expected game outputs.");
-        foreach (var original in originals.Where(file => file.Key is not "SCPSL.exe" and not "GameAssembly.dll"))
+        if (!changed.Contains("SCPSL.exe") || !changed.Contains("GameAssembly.dll") ||
+            changed.Contains(GameFileContract.BundleVersionPath) != bundleChanged || changed.Count != (bundleChanged ? 3 : 2) ||
+            !FileOps.Hash(Path.Combine(stage, "SCPSL.exe")).Equals(launcherHash, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("ModPatch did not produce all expected game outputs.");
+        foreach (var original in originals.Where(file => file.Key is not "SCPSL.exe" and not "GameAssembly.dll" &&
+                     (file.Key != GameFileContract.BundleVersionPath || !bundleChanged)))
             if (!FileOps.Hash(FileOps.SafePath(stage, original.Key)).Equals(original.Value, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"ModPatch changed an input that must remain original: {original.Key}.");
+        patches.Add(new PatchAttempt(GameFileContract.BundleVersionPatchName, bundleStatus,
+            $"{beforeBundleVersion} -> {afterBundleVersion} in {GameFileContract.BundleVersionPath} (ModPatch)"));
         return new Prepared(version, unity, report.GetProperty("metadataVersion").GetInt32(),
-            report.GetProperty("metadataNormalizedForParser").GetBoolean(), patches);
+            report.GetProperty("metadataNormalizedForParser").GetBoolean(), bundleVersion, patches);
     }
+
+    private static string? ReadString(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String ? property.GetString() : null;
 
     private static string ReadUnityVersion(string path)
     {
         string value = Regex.Match(FileVersionInfo.GetVersionInfo(path).ProductVersion ?? "", @"^\d+\.\d+\.\d+[abfp]\d+").Value;
         return value.Length > 0 ? value : throw new InvalidDataException("UnityPlayer.dll has no supported Unity identity.");
     }
+
+    private static bool IsIl2CppProfile(JsonElement profile) =>
+        !profile.TryGetProperty("backend", out var backend) || backend.ValueKind == JsonValueKind.Null ||
+        string.Equals(backend.GetString(), "il2cpp", StringComparison.OrdinalIgnoreCase);
 
     private static void ValidateCleanLauncher(string path)
     {

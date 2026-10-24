@@ -349,14 +349,14 @@ public sealed class SessionTransaction(string gameDirectory, Action<string>? log
         };
         if (journal.SchemaVersion >= 2)
         {
-            mandatory.Add((UnityBundleVersion.RelativePath, FileAction.Replace, true));
+            mandatory.Add((GameFileContract.BundleVersionPath, FileAction.Replace, true));
         }
         foreach (var (path, action, needsOriginal) in mandatory)
         {
             var entry = journal.Entries.SingleOrDefault(e => e.RelativePath.Equals(path, StringComparison.OrdinalIgnoreCase));
             if (entry == null || entry.Action != action || (needsOriginal && entry.OriginalHash == null))
                 throw new InvalidDataException($"Recovery journal lacks a mandatory file/action: {path}");
-            if (action == FileAction.Replace && needsOriginal && path != UnityBundleVersion.RelativePath && FileOps.HashEquals(entry.OriginalHash, entry.PreparedHash))
+            if (action == FileAction.Replace && needsOriginal && path != GameFileContract.BundleVersionPath && FileOps.HashEquals(entry.OriginalHash, entry.PreparedHash))
                 throw new InvalidDataException($"The supposed vanilla original already equals the modded output: {path}. Verify your game files first.");
         }
     }

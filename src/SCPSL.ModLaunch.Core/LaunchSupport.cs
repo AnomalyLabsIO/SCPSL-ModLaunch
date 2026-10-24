@@ -106,7 +106,7 @@ public static class GameProcessGuard
     public static void EnsureStopped(string gameDirectory)
     {
         string target = Path.GetFullPath(Path.Combine(gameDirectory, "SCPSL.exe"));
-        foreach (var process in new[] { "SCPSL", "SCPSL-ModLaunch.ModPatch.Headless", "SCPSL.ModPatch.Cli", "Cpp2IL" }.SelectMany(Process.GetProcessesByName))
+        foreach (var process in new[] { "SCPSL", "SCPSL-ModLaunch.ModPatch.Headless", "SCPSL ModPatch", "SCPSL.ModPatch.Cli", "Cpp2IL" }.SelectMany(Process.GetProcessesByName))
         {
             using (process)
             {

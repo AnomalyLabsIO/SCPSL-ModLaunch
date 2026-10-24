@@ -226,6 +226,7 @@ public sealed class PreparationService
             PreparedDirectory = preparedDirectory,
             Fingerprint = fingerprint,
             GameVersion = report.GameVersion,
+            BundleVersion = report.BundleVersion,
             UnityVersion = report.UnityVersion,
             DotnetRoot = dotnetRoot,
             AdapterDirectory = Path.GetDirectoryName(adapter)!,
@@ -295,15 +296,19 @@ public sealed class PreparationService
         var directory = ArtifactCache.ExtractVerified(zip, ArtifactCache.SafePath(cacheDirectory, CacheLayout.AdapterFolder(digest!)));
         var adapter = ArtifactCache.SafePath(directory, "SCPSL-ModLaunch.ModPatch.Headless.exe");
         if (!File.Exists(adapter)) throw new InvalidDataException("The companion archive is missing SCPSL-ModLaunch.ModPatch.Headless.exe.");
-        if (!File.Exists(Path.Combine(directory, "ModPatch", "bundle.json")) ||
+        string engineRoot = Path.Combine(directory, "ModPatch");
+        if (!File.Exists(Path.Combine(engineRoot, "bundle.json")) ||
             !File.Exists(Path.Combine(directory, "ModPatch", ModPatchBundle.Executable)) ||
-            !File.Exists(Path.Combine(directory, "ModPatch", ModPatchBundle.Manifest)))
+            !File.Exists(Path.Combine(directory, "ModPatch", ModPatchBundle.Manifest)) ||
+            FileOps.ReadJson<ModPatchBundle>(Path.Combine(engineRoot, "bundle.json")).Capabilities is not { } capabilities ||
+            !capabilities.Contains(ModPatchBundle.BundleVersionCapability, StringComparer.Ordinal))
         {
             var bundled = FindBundledAdapter(cacheDirectory);
-            if (bundled == null) throw new InvalidDataException("The published adapter lacks the current fork patch resources. Install a current ModLaunch package.");
-            _log("The published adapter lacks the current fork patch resources; using the packaged adapter.");
+            if (bundled == null) throw new InvalidDataException("The published adapter lacks ModPatch bundle-version correction. Install a current ModLaunch package.");
+            _log("The published adapter lacks the current fork patch resources or ModPatch bundle-version correction; using the packaged adapter.");
             return bundled;
         }
+        _ = ModPatchBundle.Read(engineRoot);
         return adapter;
     }
 
@@ -389,7 +394,7 @@ public sealed class PreparationService
             throw new InvalidDataException("The adapter returned an incomplete or incompatible preparation report.");
         if (!result.Patches.Any(x => x.Status == "applied") || result.Patches.Any(x =>
                 x.Status is not "applied" and not "alternative-selected" and not "alternative-not-needed" &&
-                !(x.Method == UnityBundleVersion.PatchName && x.Status == "already-correct")))
+                !(x.Method == GameFileContract.BundleVersionPatchName && x.Status == "already-correct")))
             throw new InvalidDataException("One or more required patches were not applied.");
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in result.Files)
@@ -407,10 +412,12 @@ public sealed class PreparationService
         }
         if (!paths.Contains("SCPSL.exe") || !paths.Contains("GameAssembly.dll"))
             throw new InvalidDataException("The adapter did not report both the clean launcher and patched GameAssembly.dll.");
-        if (!paths.Contains(UnityBundleVersion.RelativePath))
+        if (!paths.Contains(GameFileContract.BundleVersionPath))
             throw new InvalidDataException("The adapter did not report the required globalgamemanagers version fix. Update the headless adapter.");
-        if (UnityBundleVersion.Read(ArtifactCache.SafePath(stage, UnityBundleVersion.RelativePath)) != result.GameVersion)
-            throw new InvalidDataException("The staged Unity bundle version does not match the detected game version.");
+        var bundleOutput = result.Files.Single(file => file.RelativePath.Equals(GameFileContract.BundleVersionPath, StringComparison.OrdinalIgnoreCase));
+        if (result.BundleVersion is null || !result.BundleVersion.Matches(result.GameVersion, bundleOutput.Sha256) ||
+            result.Patches.Count(patch => patch.Method == GameFileContract.BundleVersionPatchName && patch.Status == result.BundleVersion.Status) != 1)
+            throw new InvalidDataException("The adapter did not verify ModPatch's Unity bundle-version correction.");
     }
 
     private PreparedSession? FindOfflineSession(string cacheDirectory, string inputKey, ModLaunchSettings settings, FileVerificationCache? verification,
@@ -468,15 +475,10 @@ public sealed class PreparationService
                 new[] { "MelonLoader/", "Mods/", "Plugins/", "UserData/", "UserLibs/", ".modlaunch/" }
                     .Any(prefix => logical.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) return false;
         }
-        foreach (var required in new[] { "SCPSL.exe", "GameAssembly.dll", UnityBundleVersion.RelativePath })
+        foreach (var required in new[] { "SCPSL.exe", "GameAssembly.dll", GameFileContract.BundleVersionPath })
             if (!outputPaths.Contains(required)) return false;
-        try
-        {
-            var bundle = session.Files.Single(file => file.RelativePath.Equals(UnityBundleVersion.RelativePath, StringComparison.OrdinalIgnoreCase));
-            if (UnityBundleVersion.Read(ArtifactCache.SafePath(session.PreparedDirectory, bundle.SourcePath!)) != session.GameVersion)
-                return false;
-        }
-        catch (InvalidDataException) { return false; }
+        var bundle = session.Files.Single(file => file.RelativePath.Equals(GameFileContract.BundleVersionPath, StringComparison.OrdinalIgnoreCase));
+        if (session.BundleVersion is null || !session.BundleVersion.Matches(session.GameVersion, bundle.Sha256)) return false;
         var runtimePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in session.RuntimeFiles)
         {

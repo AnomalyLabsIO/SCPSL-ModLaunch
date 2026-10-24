@@ -57,3 +57,27 @@ All **350 ModLaunch tests passed**. The refreshed CLI/source archives and full l
 
 Evidence is in `artifacts/standard-manifest-qualification/summary.json`, its test and fixture logs, and `artifacts/patchinfo/1427` / `1428`. The 14.2.8 feed transport was simulated; the separate resource-only check used the real public endpoint. Initial fixtures under the longer qualification path reached patching but exceeded Cpp2IL's extraction-path limit; the successful reruns use shorter private paths. No game was launched, and no commits, releases, or pull requests were published.
 
+## Unified .NET 6 compatibility package: 2026-10-24
+
+ModLaunch now bundles `SCPSL.ModPatch.dotnet6.0.zip`, whose unified `SCPSL ModPatch.exe` supports GUI and command line use. Its schema 2 identity targets `net6.0-windows`, Windows x64, single-file, framework-dependent deployment. Unlike the earlier console-only package described above, it requires the Windows x64 .NET 6 Desktop Runtime 6.0.36. Host discovery checks both Core and Desktop runtimes before preparation.
+
+The corresponding source snapshot is `SCPSL.ModPatch.sources.ebec1b86718b.zip`, SHA-256 `EBEC1B86718B9D5E012B56AAE226D8E027F1FEEC9CA6F84A4FA76A44A1B09B88`. Its inventory records base revision `42e2874db03128e8dd5c34df77a8d844b2439cc7` and working tree changes; the snapshot identifies the exact build inputs. Import and packaging verify the binary/source pair, runtime identity, archive paths, and every inventoried file. Release output includes only the matching source snapshot and its checksum.
+
+All **419 ModLaunch tests passed**. The launcher package built successfully; release checksums, embedded companion identity, retained dependency licenses, and exact source pairing passed verification. Separate malformed-package probes rejected wrong frameworks, corrupt checksums, mismatched sources, unsafe paths, duplicate paths, and incomplete or changed inventories.
+
+Fresh private 14.2.7 and 14.2.8 fixtures passed cold preparation, repeat/offline cache reuse, activation, and byte-identical restoration of all six original inputs. Each generated 109 interop assemblies. Runtime metadata remained v23. Prepared `GameAssembly.dll` and `globalgamemanagers` match the earlier qualified hashes. The new package's Unity 6000.0.43f1 clean launcher differs from the previous resource; both prepared executables match its inventoried SHA-256 `8D968EB102936F89382154E3284B2168EBA3CE769E66928B52820DD10D55E87D`, also verified against the exact source snapshot.
+
+Evidence is under `artifacts/n6/`, including `summary.json`, the VSTest result, package log, fixture logs, and each fixture's `qualification.json`. The 14.2.7 check used bundled resources; the 14.2.8 check simulated the published manifest transport and then tested offline fallback. No game was launched. Game startup, gameplay, and Proton acceptance remain separate qualification gates for this package.
+
+## Bundle-version correction owned by ModPatch: 2026-10-24
+
+ModPatch now prepares the displayed Unity version correction when invoked with `--bundle-version-mode correct`. Its structured result records the previous/new version and `applied` or `already-correct` outcome; changed `globalgamemanagers` files participate in the same before/after hash inventory as the native outputs. Correction bytes and serialization constraints are checked before any game-file save. The default `preserve` mode retains standalone historical behavior, and Mono games reject `correct` mode.
+
+ModLaunch's `UnityBundleVersion` parser/rewriter is removed. The adapter validates ModPatch's correction report and output hashes, and caches the verified correction identity. Missing correction evidence invalidates older prepared caches. Packages must advertise `bundle-version-correction`; older published companions fall back to the current bundled engine. ModLaunch continues to back up, activate, and restore `globalgamemanagers` through its existing session journal. SL-AC relocation and MelonLoader preparation remain unchanged.
+
+The updated .NET 6 binary archive has SHA-256 `800150394F57911BB3FD356D65B63F9DA7C8DDFCD41A3C0CAD8B978CD94F0DE4`. Its matching source is `SCPSL.ModPatch.sources.76ee792199ee.zip`, SHA-256 `76EE792199EE142813AE58AEE1EABEAD1FEF259E2A387D86CED8B838AA8A335E`. The source snapshot includes the working tree changes on base revision `42e2874db03128e8dd5c34df77a8d844b2439cc7`.
+
+Verification passed **427 ModLaunch tests** and **263 ModPatch tests** on .NET 6. ModPatch's real-file CLI cases include a changed version, an already-correct version omitted from the changed-file list, and an unsafe correction rejected before saving other game files. Fresh 14.2.7 and 14.2.8 private fixtures passed cold preparation, repeat/offline reuse, activation, and byte-identical restoration of all six original game inputs. Each generated 109 interop assemblies; all three prepared game outputs match the previously qualified .NET 6 outputs, and runtime metadata remains original v23.
+
+Evidence is in `artifacts/bundle-version-move/`, with final fixtures under `artifacts/bv/1427f` and `artifacts/bv/1428f`. The 14.2.7 fixture uses bundled resources; 14.2.8 simulates the immutable manifest transport before testing offline fallback. No game was launched. Startup, gameplay, and Proton qualification remain outside these preparation/restoration checks.
+
