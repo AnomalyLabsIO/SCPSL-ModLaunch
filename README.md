@@ -14,11 +14,13 @@ Other game versions supported by ModPatch may work, but have not been tested.
 
 ## How to use it:
 
-1. A separate copy of the game folder is recommended, but the launcher does restore the original game on close.
-2. Download `SCPSL-ModLaunch-win-x64.zip` from [Releases](https://github.com/AnomalyLabsIO/SCPSL-ModLaunch/releases).
-3. Extract `SCPSL-ModLaunch.exe` beside `SCPSL.exe` in the game folder.
-4. Open `SCPSL-ModLaunch.exe` and select **Launch**. The launcher prepares the game and installs MelonLoader automatically. Initial preparation requires internet access and may take a few minutes.
-5. Quit the game normally and let the launcher finish restoring the original files.
+Prerequisites: 
+- A separate copy of the game folder is recommended, but the launcher does restore the original game on close.
+- Windows .NET 6 Desktop Runtime (x64), version 6.0.36 or later
+1. Download `SCPSL-ModLaunch-win-x64.zip` from [Releases](https://github.com/AnomalyLabsIO/SCPSL-ModLaunch/releases).
+2. Extract `SCPSL-ModLaunch.exe` beside `SCPSL.exe` in the game folder.
+3. Open `SCPSL-ModLaunch.exe` and select **Launch**. The launcher prepares the game and installs MelonLoader automatically. Initial preparation requires internet access and may take a few minutes.
+4. Quit the game normally and let the launcher finish restoring the original files.
 
 When closed, the executable moves into `.modlaunch` and creates two shortcuts in the game folder:
 
@@ -30,7 +32,7 @@ When closed, the executable moves into `.modlaunch` and creates two shortcuts in
 
 ## Adding mods:
 
-Copy compatible MelonLoader mod DLLs into the `Mods` `Plugins`, `UserLibs`, and `UserData` folders in your game directory.
+Copy compatible MelonLoader mod DLLs into the `Mods`, `Plugins`, `UserLibs`, and `UserData` folders in your game directory.
 
 
 ### Command line:
