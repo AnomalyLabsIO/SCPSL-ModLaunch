@@ -125,24 +125,8 @@ internal sealed class ArtifactCache(HttpClient http, Action<string> log)
 
     internal static string ExtractVerified(string zipPath, string destination)
     {
-        var manifest = Path.Combine(destination, ".extracted.json");
-        if (File.Exists(manifest))
-        {
-            try
-            {
-                var existing = ReadJson<ExtractionManifest>(manifest);
-                if (existing.ArchiveHash == Hash(zipPath) && existing.Files is { Count: > 0 } &&
-                    existing.Files.All(x => x is not null && IsHash(x.Sha256) && Matches(SafePath(destination, x.RelativePath), x.Sha256)) &&
-                    existing.Files.Select(x => x.RelativePath.Replace('\\', '/')).Distinct(StringComparer.OrdinalIgnoreCase).Count() == existing.Files.Count)
-                {
-                    var expected = existing.Files.Select(x => x.RelativePath.Replace('\\', '/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                    if (Directory.EnumerateFiles(destination, "*", SearchOption.AllDirectories)
-                        .Select(x => Path.GetRelativePath(destination, x).Replace('\\', '/'))
-                        .All(x => x == ".extracted.json" || expected.Contains(x))) return destination;
-                }
-            }
-            catch (Exception ex) when (ex is JsonException or InvalidDataException) { /* Rebuild corrupt cache from the verified archive. */ }
-        }
+        string archiveHash = Hash(zipPath);
+        if (IsVerifiedExtraction(destination, archiveHash)) return destination;
         var temporary = destination + "." + Guid.NewGuid().ToString("N") + ".staging";
         Directory.CreateDirectory(temporary);
         try
@@ -168,7 +152,7 @@ internal sealed class ArtifactCache(HttpClient http, Action<string> log)
                 outputs.Add(new PreparedFile(relative, Hash(target)));
             }
             if (outputs.Count == 0) throw new InvalidDataException("The ZIP archive is empty.");
-            File.WriteAllText(Path.Combine(temporary, ".extracted.json"), JsonSerializer.Serialize(new ExtractionManifest(Hash(zipPath), outputs), JsonDefaults.Options));
+            File.WriteAllText(Path.Combine(temporary, ".extracted.json"), JsonSerializer.Serialize(new ExtractionManifest(archiveHash, outputs), JsonDefaults.Options));
             if (Directory.Exists(destination))
             {
                 // Never recursively delete a pre-existing cache tree. Move it aside for diagnosis.
@@ -181,6 +165,44 @@ internal sealed class ArtifactCache(HttpClient http, Action<string> log)
         {
             // A failed extraction is intentionally retained for diagnosis; it is never reused.
         }
+    }
+
+    // The release digest identifies the extracted inventory even after its consumed ZIP is removed.
+    internal static bool IsVerifiedExtraction(string destination, string archiveHash)
+    {
+        if (!IsHash(archiveHash)) return false;
+        var manifest = SafePath(destination, ".extracted.json");
+        if (File.Exists(manifest))
+        {
+            try
+            {
+                var existing = ReadJson<ExtractionManifest>(manifest);
+                if (string.Equals(existing.ArchiveHash, archiveHash, StringComparison.OrdinalIgnoreCase) && existing.Files is { Count: > 0 } &&
+                    existing.Files.All(x => x is not null && IsHash(x.Sha256) && Matches(SafePath(destination, x.RelativePath), x.Sha256)) &&
+                    existing.Files.Select(x => x.RelativePath.Replace('\\', '/')).Distinct(StringComparer.OrdinalIgnoreCase).Count() == existing.Files.Count)
+                {
+                    var expected = existing.Files.Select(x => x.RelativePath.Replace('\\', '/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (ExtractionFiles(destination)
+                        .All(x => x == ".extracted.json" || expected.Contains(x))) return true;
+                }
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException or IOException) { /* Rebuild corrupt cache from the verified archive. */ }
+        }
+        return false;
+    }
+
+    private static IEnumerable<string> ExtractionFiles(string root)
+    {
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count != 0)
+            foreach (string entry in Directory.EnumerateFileSystemEntries(pending.Pop()))
+            {
+                string relative = Path.GetRelativePath(root, entry).Replace('\\', '/');
+                _ = SafePath(root, relative);
+                if (Directory.Exists(entry)) pending.Push(entry);
+                else yield return relative;
+            }
     }
 
     // Preparation never extracts the injection proxy. Keeping it only inside the official

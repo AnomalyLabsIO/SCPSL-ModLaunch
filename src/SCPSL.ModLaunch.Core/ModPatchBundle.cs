@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -61,7 +62,9 @@ public sealed class ModPatchBundle
     internal static bool TryPinPatternManifest(string text, string revision, out JsonObject document)
     {
         if (!IsHash(revision, 40)) throw new InvalidDataException("ModPatch resources require an immutable source revision.");
-        document = JsonNode.Parse(text)?.AsObject() ?? throw new InvalidDataException("Missing pattern manifest.");
+        // ModPatch permits comments in patchinfo.json; emit ordinary JSON after pinning.
+        document = JsonNode.Parse(text, documentOptions: new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip })?.AsObject()
+            ?? throw new InvalidDataException("Missing pattern manifest.");
         if (document["versionRanges"] is not JsonArray ranges || ranges.Count == 0)
             throw new InvalidDataException("The pattern manifest has no patch targets.");
         bool hasPatterns = false;

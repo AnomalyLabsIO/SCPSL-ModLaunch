@@ -13,7 +13,7 @@ namespace SCPSL.ModLaunch.ModPatch.Headless;
 /// <summary>
 /// Generates the MelonLoader Il2Cpp interop assemblies without launching the game. This is
 /// needed for Unity builds whose runtime metadata header intentionally differs from the parser
-/// layout (Unity 6000 builds ship v23-on-v31 metadata): Unity must keep the shipped v23 file on
+/// layout (supported Unity 6000 builds ship a v23 header over newer layouts): Unity must keep the shipped file on
 /// disk, while Cpp2IL needs a temporary parser-normalized copy.
 /// </summary>
 public static class MelonInteropAssemblyGenerator
@@ -70,10 +70,13 @@ public static class MelonInteropAssemblyGenerator
                 : 0;
             if (dummyAssemblyCount == 0)
                 throw new InvalidDataException("Cpp2IL completed but produced no dummy assemblies.");
+            GeneratedAssemblyValidation.ValidateDirectory(cpp2IlOutputDir);
             Console.WriteLine($"  Cpp2IL generated {dummyAssemblyCount} dummy assembly file(s).");
 
             Console.WriteLine("  Running Il2CppInterop generator...");
             RunIl2CppInteropGenerator(gameDir, net6Dir, cpp2IlOutputDir, interopOutputDir, gameAssemblyPath);
+            int validatedAssemblies = GeneratedAssemblyValidation.ValidateDirectory(interopOutputDir);
+            Console.WriteLine($"  Validated {validatedAssemblies} interop assemblies for duplicate types and invalid nesting.");
 
             string[] generatedFiles = Directory.GetFiles(interopOutputDir, "*", SearchOption.TopDirectoryOnly);
             if (generatedFiles.Length == 0)
@@ -292,7 +295,7 @@ public static class MelonInteropAssemblyGenerator
             LoadIfExists(alc, Path.Combine(net6Dir, "AsmResolver.PE.dll"));
             LoadIfExists(alc, Path.Combine(net6Dir, "AsmResolver.PE.File.dll"));
             LoadIfExists(alc, Path.Combine(net6Dir, "Il2CppInterop.Common.dll"));
-            Assembly generatorAssembly = alc.LoadFromAssemblyPath(Path.Combine(net6Dir, "Il2CppInterop.Generator.dll"));
+            Assembly generatorAssembly = BundledInteropGenerator.Load(alc);
 
             Type moduleDefinitionType = asmResolverDotNet.GetType("AsmResolver.DotNet.ModuleDefinition")
                 ?? throw new InvalidDataException("AsmResolver.ModuleDefinition type not found.");

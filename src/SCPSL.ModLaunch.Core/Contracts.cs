@@ -15,6 +15,7 @@ public static class GameFileContract
 {
     public const string BundleVersionPath = "SCPSL_Data/globalgamemanagers";
     public const string BundleVersionPatchName = "PlayerSettings.bundleVersion";
+    public const string BootConfigPath = "SCPSL_Data/boot.config";
 }
 
 /// <summary>Verified ModPatch output identity; ModLaunch does not parse or edit Unity settings.</summary>
@@ -56,7 +57,9 @@ public sealed class PreparedSession
     public bool SkipMelonLoader { get; set; }
     public string MelonLoaderArchive { get; set; } = "";
     public string BootstrapHash { get; set; } = "";
-    // Optional launch-only native bootstrap selection; the official runtime archive stays separate.
+    // Optional launch-only native bootstrap selection; never persisted in preparation manifests.
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal byte[]? BootstrapArchiveContents { get; set; }
     public string? BootstrapArchive { get; set; }
     public string? BootstrapArchiveSha256 { get; set; }
     public List<FileIdentity> Inputs { get; set; } = [];

@@ -181,6 +181,31 @@ public sealed class ForkPatchEngineTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task CommentedPatchManifestWorksForPublishedAndBundledResources(bool offline)
+    {
+        using var game = new TestGame();
+        string manifest = "// Comments are valid in this JSON file\n" +
+            MixedManifest.Replace("\"versionRanges\":", "/* patch targets */ \"versionRanges\":");
+        CreateBundle(game.Root, manifest);
+        using var http = new HttpClient(new Handler(uri => offline
+            ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            : new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(uri.Host == "api.github.com"
+                    ? JsonSerializer.Serialize(new { sha = new string('a', 40) }) : manifest)
+            }));
+        var service = new PreparationService(_ => { }, http);
+        var resources = await service.ResolvePatchResourcesAsync(Path.Combine(game.Root, ".modlaunch"),
+            Path.Combine(game.Root, "adapter.exe"), default);
+
+        Assert.Equal(offline, resources.UnavailableOnline);
+        Assert.Equal(ModPatchBundle.PinPatternManifest(MixedManifest, new string('a', 40)).ToJsonString(),
+            JsonNode.Parse(File.ReadAllText(resources.Path))!.ToJsonString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task PublishedLegacyOffsetFeedUsesTheVerifiedBundledPatternManifest(bool mixed)
     {
         using var game = new TestGame();
@@ -331,6 +356,55 @@ public sealed class ForkPatchEngineTests
         Assert.Equal("already-correct", result.BundleVersion.Status);
         Assert.Equal(fixture.Originals[GameFileContract.BundleVersionPath], result.BundleVersion.Sha256);
         Assert.Equal("already-correct", Assert.Single(result.Patches.Where(patch => patch.Method == GameFileContract.BundleVersionPatchName)).Status);
+    }
+
+    [Fact]
+    public void ManifestBuildTypeOverrideRequiresItsAdditionalAppliedOutcome()
+    {
+        using var fixture = new ReportFixture();
+        var manifest = JsonNode.Parse(Manifest)!;
+        manifest["versionRanges"]![0]!["buildTypeOverride"] = 0;
+        manifest["versionRanges"]![0]!["methods"]!["gameVersionMethod"] = new JsonObject { ["name"] = "GameCore.Version$$.cctor" };
+        fixture.Report["patches"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
+        {
+            name = "GameCore.Version$$.cctor (build type override)", status = "applied", message = "Build type set to Release (0)."
+        }));
+        var result = fixture.Validate(manifest.ToJsonString());
+        Assert.Equal("applied", Assert.Single(result.Patches.Where(patch => patch.Method.EndsWith(" (build type override)"))).Status);
+    }
+
+    [Theory]
+    [InlineData("missing-outcome")]
+    [InlineData("unexpected-outcome")]
+    [InlineData("wrong-name")]
+    [InlineData("not-applied")]
+    [InlineData("duplicate")]
+    [InlineData("missing-method")]
+    [InlineData("invalid-byte")]
+    public void InvalidBuildTypeOverrideOutcomesCannotBeActivated(string condition)
+    {
+        using var fixture = new ReportFixture();
+        var manifest = JsonNode.Parse(Manifest)!;
+        var target = manifest["versionRanges"]![0]!;
+        target["buildTypeOverride"] = 0;
+        target["methods"]!["gameVersionMethod"] = new JsonObject { ["name"] = "GameCore.Version$$.cctor" };
+        var outcome = JsonSerializer.SerializeToNode(new
+        {
+            name = "GameCore.Version$$.cctor (build type override)", status = "applied", message = "Build type set to Release (0)."
+        })!;
+        var outcomes = fixture.Report["patches"]!.AsArray();
+        outcomes.Add(outcome);
+        switch (condition)
+        {
+            case "missing-outcome": outcomes.RemoveAt(1); break;
+            case "unexpected-outcome": target.AsObject().Remove("buildTypeOverride"); break;
+            case "wrong-name": outcome["name"] = "Other$$Method (build type override)"; break;
+            case "not-applied": outcome["status"] = "skipped-optional"; break;
+            case "duplicate": outcomes.Add(JsonNode.Parse(outcome.ToJsonString())); break;
+            case "missing-method": target["methods"]!.AsObject().Remove("gameVersionMethod"); break;
+            case "invalid-byte": target["buildTypeOverride"] = 256; break;
+        }
+        Assert.Throws<InvalidDataException>(() => fixture.Validate(manifest.ToJsonString()));
     }
 
     [Fact]

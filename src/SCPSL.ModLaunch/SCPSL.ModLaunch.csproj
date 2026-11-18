@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <OutputType>WinExe</OutputType>
+    <TargetLatestRuntimePatch>true</TargetLatestRuntimePatch>
     <AssemblyName>SCPSL-ModLaunch</AssemblyName>
     <RootNamespace>SCPSL.ModLaunch</RootNamespace>
     <ApplicationIcon>Assets/modlaunch.ico</ApplicationIcon>
@@ -11,6 +14,7 @@
     <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Assets/modlaunch.ico" LogicalName="SCPSL.ModLaunch.Icon.ico" />
     <ProjectReference Include="../SCPSL.ModLaunch.Core/SCPSL.ModLaunch.Core.csproj" />
     <EmbeddedResource Include="$(AdapterBundlePath)" LogicalName="adapter-bundled.zip" Condition="'$(AdapterBundlePath)' != '' and Exists('$(AdapterBundlePath)')" />
     <EmbeddedResource Include="$(NativeBootstrapBundlePath)" LogicalName="native-bootstrap-pr13.zip" Condition="'$(NativeBootstrapBundlePath)' != '' and Exists('$(NativeBootstrapBundlePath)')" />

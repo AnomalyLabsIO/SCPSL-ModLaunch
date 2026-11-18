@@ -143,8 +143,10 @@ try {
     New-Item -ItemType Directory -Path $releaseNotices -Force | Out-Null
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'third-party-licenses') -File | Copy-Item -Destination $releaseNotices -Force
     Copy-NativeBootstrapNotices (Join-Path $releaseNotices 'native-bootstrap-pr13')
+    Copy-Item -LiteralPath (Join-Path $adapterStage 'ThirdParty/Il2CppInterop') -Destination (Join-Path $releaseNotices 'Il2CppInterop') -Recurse
 
-    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'vendor/ModPatch') -Filter '*.txt' -File | Copy-Item -Destination $releaseNotices -Force
+    # Use the verified package's notices so dependency updates cannot retain stale vendor copies.
+    Copy-Item -LiteralPath (Join-Path $modPatchStage 'licenses') -Destination (Join-Path $releaseNotices 'ModPatch') -Recurse
     Copy-Item -LiteralPath (Join-Path $projectRoot 'vendor/ModPatch/PROVENANCE.md') -Destination (Join-Path $releaseNotices 'ModPatch-PROVENANCE.md') -Force
     $releaseDocs = Join-Path $releaseStage 'docs'
     New-Item -ItemType Directory -Path $releaseDocs -Force | Out-Null

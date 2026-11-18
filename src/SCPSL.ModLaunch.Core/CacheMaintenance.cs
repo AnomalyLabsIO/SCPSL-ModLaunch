@@ -37,6 +37,8 @@ public static class CacheMaintenance
         string current = FileOps.SafePath(cache, CacheLayout.ModdedFiles);
         if (!Path.GetFullPath(prepared.PreparedDirectory).Equals(current, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Prepared game files are outside the managed cache.");
+        if (prepared.Inputs.Count > 0)
+            SessionTransaction.CleanIdleOriginalBackups(root, prepared.Inputs, log);
         foreach (string directory in DirectoriesBelow(cache, "prepared")) TryDeleteTree(cache, directory, log);
         foreach (string directory in DirectoriesBelow(cache, CacheLayout.Temporary)) TryDeleteTree(cache, directory, log);
         foreach (string directory in DirectoriesBelow(cache, CacheLayout.Tools))
@@ -55,29 +57,25 @@ public static class CacheMaintenance
         string downloads = FileOps.SafePath(cache, "downloads");
         if (Directory.Exists(downloads))
         {
-            string? adapterName = string.IsNullOrWhiteSpace(prepared.AdapterDirectory) ? null : Path.GetFileName(prepared.AdapterDirectory.TrimEnd(Path.DirectorySeparatorChar));
-            string? currentArchive = adapterName?.StartsWith("downloaded-", StringComparison.Ordinal) == true
-                ? "SCPSL-ModLaunch-patching-tools-" + adapterName[11..] + ".zip" : null;
             foreach (string path in FilesBelow(downloads))
             {
                 string name = Path.GetFileName(path);
-                bool orphanAdapter = Path.GetDirectoryName(path) == downloads &&
-                    name.StartsWith("SCPSL-ModLaunch-patching-tools-", StringComparison.Ordinal) && name.EndsWith(".zip", StringComparison.Ordinal) && name != currentArchive;
-                if (orphanAdapter || name.EndsWith(".part", StringComparison.Ordinal) || name.EndsWith(".tmp", StringComparison.Ordinal))
+                // These payloads have been extracted/copied into verified prepared or
+                // installed files. Retain resource manifests, not download containers.
+                bool consumedDownload = Path.GetDirectoryName(path) == downloads && (
+                    name.EndsWith(".download", StringComparison.Ordinal) || name.EndsWith(".download.sha256", StringComparison.Ordinal) ||
+                    name.StartsWith("SCPSL-ModLaunch-patching-tools-", StringComparison.Ordinal) && name.EndsWith(".zip", StringComparison.Ordinal) ||
+                    name.StartsWith("MelonLoader-", StringComparison.Ordinal) && name.EndsWith(".zip", StringComparison.Ordinal) ||
+                    name.StartsWith("native-bootstrap-pr13-", StringComparison.Ordinal) && name.EndsWith(".zip", StringComparison.Ordinal) ||
+                    name.StartsWith("Unity-", StringComparison.Ordinal) && (name.EndsWith("-managed.zip", StringComparison.Ordinal) || name.EndsWith("-managed.zip.sha256", StringComparison.Ordinal)));
+                if (consumedDownload || name.EndsWith(".part", StringComparison.Ordinal) || name.EndsWith(".tmp", StringComparison.Ordinal))
                     TryDeleteFile(cache, path, log);
             }
-            if (!IsUnder(prepared.DotnetRoot, cache))
-                foreach (string zip in Directory.EnumerateFiles(downloads, "dotnet-runtime-*-win-x64.zip")) TryDeleteFile(cache, zip, log);
+            foreach (string zip in Directory.EnumerateFiles(downloads, "dotnet-runtime-*-win-x64.zip")) TryDeleteFile(cache, zip, log);
             foreach (string file in Directory.EnumerateFiles(downloads, "*.bin").Where(x => Path.GetFileNameWithoutExtension(x).Length == 64 && Path.GetFileNameWithoutExtension(x).All(Uri.IsHexDigit)))
             {
                 TryDeleteFile(cache, file, log);
                 TryDeleteFile(cache, file + ".sha256", log);
-            }
-            foreach (string sidecar in Directory.EnumerateFiles(downloads, "*.sha256").Where(x => File.Exists(x[..^7]))
-                         .OrderByDescending(x => File.GetLastWriteTimeUtc(x[..^7])).Skip(8))
-            {
-                TryDeleteFile(cache, sidecar[..^7], log);
-                TryDeleteFile(cache, sidecar, log);
             }
         }
         string oldDownloads = FileOps.SafePath(cache, "downloads/adapter-dependencies");

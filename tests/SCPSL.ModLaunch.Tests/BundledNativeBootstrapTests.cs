@@ -13,7 +13,7 @@ public sealed class BundledNativeBootstrapTests
     private static string NativeHash => Convert.ToHexString(SHA256.HashData(NativeBytes));
 
     [Fact]
-    public void SelectsSeparateArchiveWithoutChangingOfficialArchiveManagedFilesOrManifest()
+    public void SelectsInMemoryArchiveWithoutSavingAnotherCopyOrChangingManagedFilesOrManifest()
     {
         using var game = new TestGame();
         var prepared = game.Prepare();
@@ -24,33 +24,33 @@ public sealed class BundledNativeBootstrapTests
         FileOps.WriteJson(manifest, prepared);
         byte[] manifestBytes = File.ReadAllBytes(manifest);
         Install(game, prepared);
-        Assert.NotEqual(official, prepared.BootstrapArchive);
-        Assert.StartsWith("MelonLoader-0.7.3-native-bootstrap-PR13", Path.GetFileName(prepared.BootstrapArchive));
+        Assert.Null(prepared.BootstrapArchive);
+        Assert.NotNull(prepared.BootstrapArchiveContents);
+        Assert.Single(Directory.GetFiles(Path.GetDirectoryName(official)!, "*", SearchOption.AllDirectories));
         Assert.Equal(official, prepared.MelonLoaderArchive);
         Assert.Equal(officialHash, FileOps.Hash(official));
         Assert.Equal(NativeHash, prepared.BootstrapHash);
-        Assert.Equal(FileOps.Hash(prepared.BootstrapArchive!), prepared.BootstrapArchiveSha256);
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(prepared.BootstrapArchiveContents!)), prepared.BootstrapArchiveSha256);
+        Assert.DoesNotContain("bootstrapArchiveContents", JsonSerializer.Serialize(prepared, JsonDefaults.Options));
         Assert.Equal(manifestBytes, File.ReadAllBytes(manifest));
         Assert.False(File.Exists(Path.Combine(game.Root, "version.dll")));
         AssertRuntimeUnchanged(game, runtime);
     }
 
     [Fact]
-    public void CachedArchiveIsVerifiedAndRepairedFromTheValidatedBundle()
+    public void RepeatedSelectionReplacesMemoryWithoutWritingAnyArchive()
     {
         using var game = new TestGame();
         var prepared = game.Prepare();
         Install(game, prepared);
-        string path = prepared.BootstrapArchive!;
+        byte[] contents = prepared.BootstrapArchiveContents!;
         string hash = prepared.BootstrapArchiveSha256!;
-        var stamp = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        File.SetLastWriteTimeUtc(path, stamp);
+        contents[0] ^= 1;
         Install(game, prepared);
-        Assert.Equal(path, prepared.BootstrapArchive);
-        Assert.Equal(stamp, File.GetLastWriteTimeUtc(path));
-        File.WriteAllText(path, "corrupt cached archive");
-        Install(game, prepared);
-        Assert.Equal(hash, FileOps.Hash(path));
+        Assert.NotSame(contents, prepared.BootstrapArchiveContents);
+        Assert.Equal(hash, Convert.ToHexString(SHA256.HashData(prepared.BootstrapArchiveContents!)));
+        Assert.Null(prepared.BootstrapArchive);
+        Assert.Single(Directory.GetFiles(Path.Combine(Cache(game), "downloads"), "*", SearchOption.AllDirectories));
     }
 
     [Fact]
@@ -92,13 +92,14 @@ public sealed class BundledNativeBootstrapTests
     }
 
     [Fact]
-    public void SelectedBootstrapActivatesAndRestoresWithoutReplacingManagedRuntime()
+    public void SelectedBootstrapActivatesAndRestoresAfterOfficialDownloadIsRemoved()
     {
         using var game = new TestGame();
         var prepared = game.Prepare();
         var runtime = WriteRuntime(game);
-        string officialHash = FileOps.Hash(prepared.MelonLoaderArchive);
         Install(game, prepared);
+        File.Delete(prepared.MelonLoaderArchive);
+        Assert.Empty(Directory.GetFiles(Path.Combine(Cache(game), "downloads")));
         var transaction = new SessionTransaction(game.Root);
         var journal = transaction.Create(prepared);
         Assert.Equal(NativeHash, journal.Entries.Single(entry => entry.RelativePath == "version.dll").PreparedHash);
@@ -110,7 +111,7 @@ public sealed class BundledNativeBootstrapTests
         Assert.Null(transaction.LoadPending());
         AssertOriginals(game);
         AssertRuntimeUnchanged(game, runtime);
-        Assert.Equal(officialHash, FileOps.Hash(prepared.MelonLoaderArchive));
+        Assert.False(File.Exists(prepared.MelonLoaderArchive));
     }
 
     [Theory]
@@ -127,7 +128,8 @@ public sealed class BundledNativeBootstrapTests
         });
         var journal = transaction.Create(prepared);
         Assert.Throws<SimulatedInterruption>(() => transaction.Activate(journal));
-        File.Delete(prepared.BootstrapArchive!);
+        prepared.BootstrapArchiveContents = null;
+        File.Delete(prepared.MelonLoaderArchive);
         var recovery = new SessionTransaction(game.Root);
         var pending = recovery.LoadPending();
         Assert.NotNull(pending);
@@ -142,7 +144,7 @@ public sealed class BundledNativeBootstrapTests
         using var game = new TestGame();
         var prepared = game.Prepare();
         Install(game, prepared);
-        File.AppendAllText(prepared.BootstrapArchive!, "changed container");
+        prepared.BootstrapArchiveContents = prepared.BootstrapArchiveContents!.Concat(new byte[] { 1 }).ToArray();
         var transaction = new SessionTransaction(game.Root);
         Assert.Throws<InvalidDataException>(() => transaction.Create(prepared));
         Assert.Null(transaction.LoadPending());
@@ -158,8 +160,8 @@ public sealed class BundledNativeBootstrapTests
         byte[] changed = (byte[])NativeBytes.Clone();
         changed[0] ^= 1;
         using var archive = Archive(("version.dll", changed));
-        File.WriteAllBytes(prepared.BootstrapArchive!, archive.ToArray());
-        prepared.BootstrapArchiveSha256 = FileOps.Hash(prepared.BootstrapArchive!);
+        prepared.BootstrapArchiveContents = archive.ToArray();
+        prepared.BootstrapArchiveSha256 = Convert.ToHexString(SHA256.HashData(prepared.BootstrapArchiveContents));
         var transaction = new SessionTransaction(game.Root);
         Assert.Throws<InvalidDataException>(() => transaction.Create(prepared));
         Assert.Null(transaction.LoadPending());
@@ -180,9 +182,9 @@ public sealed class BundledNativeBootstrapTests
         switch (defect)
         {
             case "missing-hash": prepared.BootstrapArchiveSha256 = null; break;
-            case "missing-archive": prepared.BootstrapArchive = null; break;
+            case "missing-archive": prepared.BootstrapArchiveContents = null; break;
             case "empty-hash": prepared.BootstrapArchiveSha256 = ""; break;
-            case "empty-archive": prepared.BootstrapArchive = ""; break;
+            case "empty-archive": prepared.BootstrapArchiveContents = null; prepared.BootstrapArchive = ""; break;
             default: prepared.BootstrapArchiveSha256 = "bad"; break;
         }
         Assert.Throws<InvalidDataException>(() => new SessionTransaction(game.Root).Create(prepared));
@@ -196,7 +198,8 @@ public sealed class BundledNativeBootstrapTests
         var prepared = game.Prepare();
         Install(game, prepared);
         string outside = Path.Combine(game.Root, "outside.zip");
-        File.Copy(prepared.BootstrapArchive!, outside);
+        File.WriteAllBytes(outside, prepared.BootstrapArchiveContents!);
+        prepared.BootstrapArchiveContents = null;
         prepared.BootstrapArchive = outside;
         Assert.Throws<InvalidDataException>(() => new SessionTransaction(game.Root).Create(prepared));
         AssertOriginals(game);

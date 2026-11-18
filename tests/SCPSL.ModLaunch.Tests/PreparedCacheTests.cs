@@ -30,6 +30,16 @@ public sealed class PreparedCacheTests
         Assert.False(cache.Validate());
     }
 
+    [Fact]
+    public void WindowsAbsolutePathCasingStillIdentifiesTheSamePreparedFilesAndArchive()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var cache = new CachedPreparation();
+        cache.Session.PreparedDirectory = cache.Session.PreparedDirectory.ToUpperInvariant();
+        cache.Session.MelonLoaderArchive = cache.Session.MelonLoaderArchive.ToUpperInvariant();
+        Assert.True(cache.Validate());
+    }
+
     [Theory]
     [InlineData("SCPSL.exe")]
     [InlineData(GameFileContract.BundleVersionPath)]
@@ -151,6 +161,72 @@ public sealed class PreparedCacheTests
     }
 
     [Fact]
+    public void CompleteCacheNeedsNeitherConsumedDownloadsNorOriginalBackups()
+    {
+        using var cache = new CachedPreparation();
+        cache.DiscardDownload();
+        Assert.False(Directory.Exists(Path.Combine(cache.GameRoot, ".modlaunch", CacheLayout.OriginalFiles)));
+        Assert.True(cache.ValidateWithoutDownload());
+    }
+
+    [Fact]
+    public void ConsumedArchiveContentsDoNotInvalidateVerifiedOutputs()
+    {
+        using var cache = new CachedPreparation();
+        File.WriteAllText(cache.Session.MelonLoaderArchive, "obsolete download, never used by a warm launch");
+        Assert.True(cache.ValidateWithoutDownload());
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void MissingDownloadsNeverHideChangedOrMissingPreparedAndRuntimeFiles(bool runtime, bool missing)
+    {
+        using var cache = new CachedPreparation();
+        cache.DiscardDownload();
+        Assert.True(cache.ValidateWithoutDownload());
+        string path = runtime ? Path.Combine(cache.GameRoot, "MelonLoader/net6/MelonLoader.dll") : cache.PayloadPath("GameAssembly.dll");
+        if (missing) File.Delete(path);
+        else File.AppendAllText(path, "changed");
+        Assert.False(cache.ValidateWithoutDownload());
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")]
+    public void MissingArchiveStillRequiresTheVerifiedStockBootstrapIdentity(string bootstrapHash)
+    {
+        using var cache = new CachedPreparation();
+        cache.DiscardDownload();
+        cache.Session.BootstrapHash = bootstrapHash;
+        Assert.False(cache.ValidateWithoutDownload());
+    }
+
+    [Fact]
+    public async Task OfflineWarmPreparationReusesExistingFilesAfterDownloadsAndBackupsAreRemoved()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var cache = new CachedPreparation();
+        cache.DiscardDownload();
+        cache.Session.BootstrapHash = "0CE7A4E530C7F83F172A2C44AED45EEDB3BDCF06B83760F143A0FBA6885FA929";
+        cache.Session.PatchEngine = ModPatchBundle.Repository;
+        var settings = new ModLaunchSettings();
+        cache.SaveManifest(settings);
+        var logs = new List<string>();
+        using var http = new HttpClient(new OfflineHandler());
+        var service = new PreparationService(logs.Add, http);
+
+        var session = await service.PrepareAsync(cache.GameRoot, Path.Combine(cache.GameRoot, ".modlaunch"), settings, CancellationToken.None);
+
+        Assert.Equal(cache.Session.Fingerprint, session.Fingerprint);
+        Assert.Contains(logs, line => line == "Using the complete validated preparation for these unchanged game files.");
+        Assert.DoesNotContain(logs, line => line.Contains("Running the headless", StringComparison.Ordinal));
+        Assert.False(Directory.Exists(Path.Combine(cache.GameRoot, ".modlaunch", CacheLayout.Temporary)));
+    }
+
+    [Fact]
     public void PatchOnlyCacheRequiresNoMelonLoaderArchiveOrInstalledRuntime()
     {
         using var cache = new CachedPreparation(skipMelonLoader: true);
@@ -217,6 +293,7 @@ public sealed class PreparedCacheTests
         private string PreparedDirectory => Path.Combine(CacheDirectory, CacheLayout.ModdedFiles);
         private string InputKey { get; }
         private string ArchiveHash { get; } = "";
+        private string BootstrapHash { get; } = "";
 
         public CachedPreparation(bool skipMelonLoader = false)
         {
@@ -247,6 +324,7 @@ public sealed class PreparedCacheTests
             using (var stream = new StreamWriter(archive.CreateEntry("version.dll").Open())) stream.Write("verified bootstrap");
             ArchiveHash = FileOps.Hash(Session.MelonLoaderArchive);
             Session.BootstrapHash = ArtifactCache.BootstrapHash(Session.MelonLoaderArchive);
+            BootstrapHash = Session.BootstrapHash;
         }
 
         private static PreparedFile WriteFixture(string root, string relative, string? source = null)
@@ -261,6 +339,17 @@ public sealed class PreparedCacheTests
 
         public string PayloadPath(string relative) => Path.Combine(Session.PreparedDirectory, Session.Files.Single(file => file.RelativePath == relative).SourcePath!);
         public bool Validate() => PreparationService.ValidateSession(Session, PreparedDirectory, CacheDirectory, InputKey, ArchiveHash);
+        public void DiscardDownload() => File.Delete(Session.MelonLoaderArchive);
+        public bool ValidateWithoutDownload() => PreparationService.ValidateSession(Session, PreparedDirectory, CacheDirectory, InputKey,
+            ArchiveHash, expectedStockBootstrapHash: BootstrapHash);
+        public void SaveManifest(ModLaunchSettings settings) => FileOps.WriteJson(Path.Combine(PreparedDirectory, CacheLayout.PreparationManifest),
+            new { InputKey, settings.AdapterRepository, settings.MelonLoaderVersion, Session });
         public void Dispose() => game.Dispose();
+    }
+
+    private sealed class OfflineHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            throw new HttpRequestException("Offline fixture; patch tools must never execute.");
     }
 }

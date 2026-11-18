@@ -5,6 +5,86 @@ namespace SCPSL.ModLaunch.Tests;
 
 public sealed class SessionTransactionTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DirectStorageEditBacksUpAndRestoresExactBootConfiguration(bool skipMelonLoader)
+    {
+        using var game = new TestGame();
+        const string relative = GameFileContract.BootConfigPath;
+        byte[] original = "\uFEFFenable-directstorage = True  # bêta\r\nother-option=True\r\n"u8.ToArray();
+        game.Write(relative, original);
+        var prepared = game.Prepare();
+        prepared.SkipMelonLoader = skipMelonLoader;
+        var transaction = new SessionTransaction(game.Root);
+        var journal = transaction.Create(prepared);
+        var entry = Assert.Single(journal.Entries, e => e.RelativePath == relative);
+        string file = Path.Combine(game.Root, relative);
+        string backup = Path.Combine(game.Root, ".modlaunch", entry.BackupPath!);
+        Assert.Equal(original, File.ReadAllBytes(file));
+        Assert.Equal(original, File.ReadAllBytes(backup));
+
+        transaction.Activate(journal);
+        Assert.Equal("\uFEFFenable-directstorage = False  # bêta\r\nother-option=True\r\n"u8.ToArray(), File.ReadAllBytes(file));
+
+        var recovery = new SessionTransaction(game.Root);
+        var pending = Assert.IsType<SessionJournal>(recovery.LoadPending());
+        recovery.VerifyActive(pending);
+        Assert.True(recovery.Restore(pending).Success);
+        Assert.Equal(original, File.ReadAllBytes(file));
+        Assert.False(File.Exists(backup));
+    }
+
+    [Theory]
+    [InlineData("enable-directstorage=False\n")]
+    [InlineData("# enable-directstorage=True\nother-option=True\n")]
+    public void BootConfigurationAlreadyDisabledOrWithoutDirectStorageIsLeftAlone(string contents)
+    {
+        using var game = new TestGame();
+        game.Write(GameFileContract.BootConfigPath, System.Text.Encoding.UTF8.GetBytes(contents));
+        var transaction = new SessionTransaction(game.Root);
+        var journal = transaction.Create(game.Prepare());
+        Assert.DoesNotContain(journal.Entries, e => e.RelativePath == GameFileContract.BootConfigPath);
+        transaction.Activate(journal);
+        Assert.Equal(contents, File.ReadAllText(Path.Combine(game.Root, GameFileContract.BootConfigPath)));
+        Assert.True(transaction.Restore(journal).Success);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RetainedSessionPersistsBootConfigurationBackupBeforeEditing(bool interrupt)
+    {
+        using var game = new TestGame();
+        const string relative = GameFileContract.BootConfigPath;
+        var transaction = new SessionTransaction(game.Root);
+        var journal = transaction.Create(game.Prepare());
+        transaction.Activate(journal);
+        byte[] original = "enable-directstorage=True\n"u8.ToArray();
+        game.Write(relative, original);
+
+        var resumed = new SessionTransaction(game.Root, checkpoint: point =>
+        {
+            if (point != "before-activate:" + relative) return;
+            var saved = Assert.IsType<SessionJournal>(transaction.LoadPending());
+            var entry = Assert.Single(saved.Entries, e => e.RelativePath == relative);
+            Assert.Equal(original, File.ReadAllBytes(Path.Combine(game.Root, ".modlaunch", entry.BackupPath!)));
+            if (interrupt) throw new SimulatedInterruption();
+        });
+        var pending = Assert.IsType<SessionJournal>(resumed.LoadPending());
+        resumed.VerifyActive(pending);
+        if (interrupt) Assert.Throws<SimulatedInterruption>(() => resumed.ApplyBootConfigToRetainedSession(pending));
+        else
+        {
+            resumed.ApplyBootConfigToRetainedSession(pending);
+            resumed.ApplyBootConfigToRetainedSession(pending);
+            resumed.VerifyActive(pending);
+            Assert.Equal("enable-directstorage=False\n", File.ReadAllText(Path.Combine(game.Root, relative)));
+        }
+        Assert.True(transaction.Restore(Assert.IsType<SessionJournal>(transaction.LoadPending())).Success);
+        Assert.Equal(original, File.ReadAllBytes(Path.Combine(game.Root, relative)));
+    }
+
     [Fact]
     public void CompleteSessionRestoresOriginalsAndRetainsUserFilesAndLoaderWork()
     {
@@ -32,6 +112,8 @@ public sealed class SessionTransactionTests
         Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(Path.Combine(game.Root, "MelonLoader/Il2CppAssemblies/Assembly-CSharp.dll")));
         foreach (var path in new[] { "Mods/user.dll", "Plugins/plugin.dll", "UserData/user.cfg", "UserLibs/library.dll" })
             Assert.Equal("user owned " + path, File.ReadAllText(Path.Combine(game.Root, path)));
+        Assert.All(journal.Entries.Where(entry => entry.BackupPath != null),
+            entry => Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch", entry.BackupPath!))));
     }
 
     [Fact]
@@ -227,9 +309,9 @@ public sealed class SessionTransactionTests
         string cache = Path.Combine(game.Root, ".modlaunch");
         foreach (var entry in journal.Entries.Where(e => e.OriginalHash != null))
         {
-            string previous = entry.BackupPath!;
+            string previous = entry.BackupPath == null ? Path.Combine(game.Root, entry.RelativePath) : Path.Combine(cache, entry.BackupPath);
             entry.BackupPath = $"originals/{entry.OriginalHash!.ToUpperInvariant()}.bin";
-            FileOps.CopyVerified(Path.Combine(cache, previous), Path.Combine(cache, entry.BackupPath), entry.OriginalHash);
+            FileOps.CopyVerified(previous, Path.Combine(cache, entry.BackupPath), entry.OriginalHash);
         }
         foreach (var entry in journal.Entries)
         {
@@ -268,6 +350,8 @@ public sealed class SessionTransactionTests
         Assert.Equal("external update", File.ReadAllText(Path.Combine(game.Root, changedPath)));
         Assert.False(File.Exists(Path.Combine(game.Root, "version.dll")));
         Assert.NotNull(transaction.LoadPending());
+        Assert.All(journal.Entries.Where(entry => entry.BackupPath != null),
+            entry => Assert.True(File.Exists(Path.Combine(game.Root, ".modlaunch", entry.BackupPath!))));
         Assert.Equal("prepared fixture SCPSL.exe", File.ReadAllText(Path.Combine(game.Root, "SCPSL.exe")));
     }
 
@@ -319,28 +403,142 @@ public sealed class SessionTransactionTests
         Assert.True(transaction.Restore(journal).Success);
     }
 
-    [Fact]
-    public void RepeatedSessionsReuseImmutableOriginalBackups()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RepeatedSessionsRecreateRecoveryBackupsWithoutRebuildingPreparedOutputs(bool skipMelonLoader)
     {
         using var game = new TestGame();
         var transaction = new SessionTransaction(game.Root);
         var prepared = game.Prepare();
+        prepared.SkipMelonLoader = skipMelonLoader;
+        var outputs = prepared.Files.Select(file => Path.Combine(game.Stage, file.SourcePath!)).ToArray();
+        var outputHashes = outputs.Select(FileOps.Hash).ToArray();
         var first = transaction.Create(prepared);
+        string[] backups = first.Entries.Where(entry => entry.BackupPath != null)
+            .Select(entry => Path.Combine(game.Root, ".modlaunch", entry.BackupPath!)).ToArray();
+        Assert.Equal(4, backups.Length);
+        Assert.All(backups, backup => Assert.True(File.Exists(backup)));
         transaction.Activate(first);
         Assert.True(transaction.Restore(first).Success);
-        string backupDirectory = Path.Combine(game.Root, ".modlaunch", "original-game-files");
-        var before = Directory.GetFiles(backupDirectory, "*", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).ToArray();
-        Assert.Equal(game.Originals.Count, before.Length);
-        var hashes = before.Select(FileOps.Hash).ToArray();
+        Assert.All(backups, backup => Assert.False(File.Exists(backup)));
 
         var second = transaction.Create(prepared);
+        Assert.All(backups, backup => Assert.True(File.Exists(backup)));
         transaction.Activate(second);
+        transaction.VerifyActive(second);
         Assert.True(transaction.Restore(second).Success);
-        var after = Directory.GetFiles(backupDirectory, "*", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).ToArray();
-        Assert.Equal(before, after);
-        Assert.Equal(hashes, after.Select(FileOps.Hash));
+        Assert.All(backups, backup => Assert.False(File.Exists(backup)));
+        Assert.Equal(outputHashes, outputs.Select(FileOps.Hash));
         Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch"), "version.dll", SearchOption.AllDirectories));
         Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch", "temporary"), "SL-AC.dll.original", SearchOption.AllDirectories));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NewJournalsObserveUnchangedInputsWithoutCopyingThem(bool skipMelonLoader)
+    {
+        using var game = new TestGame();
+        var prepared = game.Prepare();
+        prepared.SkipMelonLoader = skipMelonLoader;
+        var transaction = new SessionTransaction(game.Root);
+        var journal = transaction.Create(prepared);
+        Assert.Equal(skipMelonLoader ? 6 : 5, journal.SchemaVersion);
+        foreach (string relative in new[] { "UnityPlayer.dll", SessionTransaction.RuntimeMetadataPath })
+        {
+            var observed = journal.Entries.Single(entry => entry.RelativePath == relative);
+            Assert.Equal(FileAction.Observe, observed.Action);
+            Assert.Null(observed.BackupPath);
+            Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch", CacheLayout.OriginalFile(relative, observed.OriginalHash!))));
+        }
+        transaction.Activate(journal);
+        transaction.VerifyActive(journal);
+        Assert.True(transaction.Restore(journal).Success);
+    }
+
+    [Fact]
+    public void BackupCleanupRunsOnlyAfterVerifiedRestoreAndJournalRemoval()
+    {
+        using var game = new TestGame();
+        var prepared = game.Prepare();
+        var transaction = new SessionTransaction(game.Root);
+        var journal = transaction.Create(prepared);
+        transaction.Activate(journal);
+        string[] backups = journal.Entries.Where(entry => entry.BackupPath != null)
+            .Select(entry => Path.Combine(game.Root, ".modlaunch", entry.BackupPath!)).ToArray();
+        Assert.Throws<InvalidOperationException>(() => SessionTransaction.CleanIdleOriginalBackups(game.Root, prepared.Inputs));
+        Assert.All(backups, backup => Assert.True(File.Exists(backup)));
+        var interrupted = new SessionTransaction(game.Root, checkpoint: point =>
+        {
+            if (point != "journal-cleared") return;
+            Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch", "session.json")));
+            Assert.All(backups, backup => Assert.True(File.Exists(backup)));
+            throw new SimulatedInterruption();
+        });
+        Assert.Throws<SimulatedInterruption>(() => interrupted.Restore(journal));
+        SessionTransaction.CleanIdleOriginalBackups(game.Root, prepared.Inputs);
+        Assert.All(backups, backup => Assert.False(File.Exists(backup)));
+        Assert.True(transaction.Restore(journal).Success);
+    }
+
+    [Fact]
+    public void RestoreCleanupPreservesChangedAndUnrelatedBackups()
+    {
+        using var game = new TestGame();
+        var transaction = new SessionTransaction(game.Root);
+        var journal = transaction.Create(game.Prepare());
+        string changed = Path.Combine(game.Root, ".modlaunch", journal.Entries.Single(entry => entry.RelativePath == "SCPSL.exe").BackupPath!);
+        File.WriteAllText(changed, "changed backup must survive");
+        string unrelated = ".modlaunch/" + CacheLayout.OriginalFile("GameAssembly.dll", new string('1', 64));
+        game.Write(unrelated, [1, 2, 3]);
+        Assert.True(transaction.Restore(journal).Success); // The originals were never activated.
+        Assert.Equal("changed backup must survive", File.ReadAllText(changed));
+        Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(Path.Combine(game.Root, unrelated)));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IdleCleanupRemovesVerifiedOldBackupsAndPreservesUnknownOrChangedFiles(bool changedInput)
+    {
+        using var game = new TestGame();
+        var prepared = game.Prepare();
+        string hash = FileOps.Hash(Path.Combine(game.Root, "UnityPlayer.dll"));
+        string known = ".modlaunch/" + CacheLayout.OriginalFile("UnityPlayer.dll", hash);
+        game.Write(known, game.Originals["UnityPlayer.dll"]);
+        string oldHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(new byte[] { 8, 9, 10 }));
+        string old = ".modlaunch/" + CacheLayout.OriginalFile("GameAssembly.dll", oldHash);
+        game.Write(old, [8, 9, 10]);
+        string legacy = $".modlaunch/originals/{oldHash}.bin";
+        game.Write(legacy, [8, 9, 10]);
+        string changed = ".modlaunch/" + CacheLayout.OriginalFile("SCPSL.exe", new string('0', 64));
+        game.Write(changed, [4, 5, 6]);
+        string unknown = ".modlaunch/" + CacheLayout.OriginalFile("unknown.dll", oldHash);
+        game.Write(unknown, [8, 9, 10]);
+        game.Write(".modlaunch/original-game-files/keep.txt", [11, 12, 13]);
+        if (changedInput) game.Write("GameAssembly.dll", [99]);
+
+        SessionTransaction.CleanIdleOriginalBackups(game.Root, prepared.Inputs);
+
+        foreach (string path in new[] { known, old, legacy }) Assert.Equal(changedInput, File.Exists(Path.Combine(game.Root, path)));
+        foreach (string path in new[] { changed, unknown, ".modlaunch/original-game-files/keep.txt" }) Assert.True(File.Exists(Path.Combine(game.Root, path)));
+    }
+
+    [Fact]
+    public void AnOldJournalCannotRestoreOrDeleteAnotherActiveSessionsRecoveryFiles()
+    {
+        using var game = new TestGame();
+        var prepared = game.Prepare();
+        var transaction = new SessionTransaction(game.Root);
+        var first = transaction.Create(prepared);
+        Assert.True(transaction.Restore(first).Success);
+        var current = transaction.Create(prepared);
+        transaction.Activate(current);
+        Assert.Throws<InvalidOperationException>(() => transaction.Restore(first));
+        Assert.Equal(current.Id, transaction.LoadPending()!.Id);
+        transaction.VerifyActive(current);
+        Assert.True(transaction.Restore(current).Success);
     }
 
     [Fact]

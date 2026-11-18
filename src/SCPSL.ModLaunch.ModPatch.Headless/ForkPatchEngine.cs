@@ -91,6 +91,15 @@ internal static class ForkPatchEngine
             target.GetProperty("metadataVersion").GetInt32() != report.GetProperty("metadataVersion").GetInt32())
             throw new InvalidDataException("ModPatch selected a profile for another Unity or metadata version.");
         var definitions = target.GetProperty("methods").GetProperty("patchMethods").EnumerateArray().ToArray();
+        if (target.TryGetProperty("buildTypeOverride", out var buildType) && buildType.ValueKind != JsonValueKind.Null)
+        {
+            if (buildType.ValueKind != JsonValueKind.Number || !buildType.TryGetByte(out _) ||
+                !target.GetProperty("methods").TryGetProperty("gameVersionMethod", out var versionMethod) ||
+                versionMethod.ValueKind != JsonValueKind.Object || ReadString(versionMethod, "name") is not { Length: > 0 } versionMethodName)
+                throw new InvalidDataException("The build-type override lacks a byte value or game-version method.");
+            // ModPatch appends this manifest-directed patch after the ordinary method patches.
+            definitions = [.. definitions, JsonSerializer.SerializeToElement(new { name = versionMethodName + " (build type override)" })];
+        }
         var outcomes = report.GetProperty("patches").EnumerateArray().ToArray();
         if (outcomes.Length != definitions.Length || outcomes.Length == 0) throw new InvalidDataException("ModPatch omitted patch outcomes.");
         var patches = new List<PatchAttempt>();

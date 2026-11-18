@@ -1,6 +1,9 @@
 using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using SCPSL.ModLaunch.Core;
 using SCPSL.ModLaunch.Core.Provisioning;
 using Xunit;
 
@@ -90,6 +93,74 @@ public sealed class ArtifactCacheTests
         Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(Path.Combine(destination, "nested", "payload.dll")));
         string retained = Assert.Single(Directory.GetDirectories(game.Root, "extract.invalid-*"));
         Assert.Equal(new byte[] { 99 }, File.ReadAllBytes(Path.Combine(retained, "nested", "payload.dll")));
+    }
+
+    [Fact]
+    public void ExtractedInventoryRemainsVerifiableWithoutItsConsumedArchive()
+    {
+        using var game = new TestGame();
+        string zip = MakeZip(game.Root, [("nested/payload.dll", new byte[] { 1, 2, 3 })]);
+        string digest = FileOps.Hash(zip);
+        string destination = Path.Combine(game.Root, "extract");
+        ArtifactCache.ExtractVerified(zip, destination);
+        File.Delete(zip);
+
+        Assert.True(ArtifactCache.IsVerifiedExtraction(destination, digest));
+        Assert.False(ArtifactCache.IsVerifiedExtraction(destination, new string('F', 64)));
+        File.WriteAllBytes(Path.Combine(destination, "nested", "payload.dll"), [99]);
+        Assert.False(ArtifactCache.IsVerifiedExtraction(destination, digest));
+    }
+
+    [Fact]
+    public async Task AdapterDownloadIsDiscardedAndOnlyFetchedAgainWhenExtractedFilesChange()
+    {
+        using var game = new TestGame();
+        var payloads = new Dictionary<string, byte[]>
+        {
+            [ModPatchBundle.Executable] = Encoding.UTF8.GetBytes("fixture patch engine; never executed"),
+            [ModPatchBundle.Manifest] = Encoding.UTF8.GetBytes("{}")
+        };
+        var bundle = new ModPatchBundle
+        {
+            SchemaVersion = 2, SourceRepository = ModPatchBundle.Repository, SourceRevision = new string('A', 40),
+            SourceSha256 = new string('B', 64), TargetFramework = "net6.0-windows", RuntimeIdentifier = "win-x64",
+            EntryPoint = ModPatchBundle.Executable, SelfContained = false, SingleFile = true,
+            Capabilities = [ModPatchBundle.BundleVersionCapability],
+            Files = payloads.Select(pair => new PreparedFile(pair.Key, Convert.ToHexString(SHA256.HashData(pair.Value)))).ToList()
+        };
+        var files = payloads.Select(pair => ("ModPatch/" + pair.Key, pair.Value)).ToList();
+        files.Add(("ModPatch/bundle.json", JsonSerializer.SerializeToUtf8Bytes(bundle, JsonDefaults.Options)));
+        byte[] helper = Encoding.UTF8.GetBytes("fixture headless helper; never executed");
+        files.Add(("SCPSL-ModLaunch.ModPatch.Headless.exe", helper));
+        byte[] archive = File.ReadAllBytes(MakeZip(game.Root, files));
+        string digest = Convert.ToHexString(SHA256.HashData(archive));
+        const string asset = "SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip";
+        int downloads = 0;
+        using var handler = new StubHandler(request =>
+        {
+            if (request.RequestUri!.Host == "api.github.com")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    draft = false, prerelease = false,
+                    assets = new[] { new { name = asset, digest = "sha256:" + digest,
+                        browser_download_url = "https://github.com/AnomalyLabsIO/SCPSL-ModLaunch/releases/download/v0.1.0/" + asset } }
+                })) };
+            downloads++;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(archive) };
+        });
+        using var http = new HttpClient(handler);
+        var service = new PreparationService(_ => { }, http);
+        string cache = Path.Combine(game.Root, ".modlaunch");
+        string adapter = await service.ResolveAdapterAsync(cache, "AnomalyLabsIO/SCPSL-ModLaunch", default);
+        Assert.False(File.Exists(Path.Combine(cache, CacheLayout.AdapterDownload(digest))));
+        Assert.Equal(adapter, await service.ResolveAdapterAsync(cache, "AnomalyLabsIO/SCPSL-ModLaunch", default));
+        Assert.Equal(1, downloads);
+
+        File.WriteAllText(adapter, "changed helper");
+        Assert.Equal(adapter, await service.ResolveAdapterAsync(cache, "AnomalyLabsIO/SCPSL-ModLaunch", default));
+        Assert.Equal(2, downloads);
+        Assert.Equal(helper, File.ReadAllBytes(adapter));
+        Assert.False(File.Exists(Path.Combine(cache, CacheLayout.AdapterDownload(digest))));
     }
 
     [Fact]

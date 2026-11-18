@@ -75,12 +75,17 @@ function Assert-Installed($Fixture) {
     Assert-Check ($owner.executableSha256 -eq $updatedHash) 'Launcher ownership was not updated.'
     $shell = New-Object -ComObject WScript.Shell
     try {
-        $link = $shell.CreateShortcut((Join-Path $Fixture.Root 'SCPSL-ModLaunch.lnk'))
-        try {
-            Assert-Check ($link.TargetPath -eq $installed) 'Shortcut target mismatch.'
-            Assert-Check ($link.WorkingDirectory -eq $Fixture.Root) 'Shortcut working directory mismatch.'
+        foreach ($name in @('SCPSL ModLaunch.lnk', 'SCPSL ModLaunch GUI.lnk')) {
+            $link = $shell.CreateShortcut((Join-Path $Fixture.Root $name))
+            try {
+                Assert-Check ($link.TargetPath -eq $installed) 'Shortcut target mismatch.'
+                Assert-Check ($link.WorkingDirectory -eq $Fixture.Root) 'Shortcut working directory mismatch.'
+                if ($name -eq 'SCPSL ModLaunch GUI.lnk') {
+                    Assert-Check ($link.Arguments -eq '--modlaunch-gui') 'GUI shortcut mode mismatch.'
+                }
+            }
+            finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
         }
-        finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
     }
     finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
 }
@@ -95,7 +100,7 @@ Assert-Installed $first
 $installed = New-Fixture 'installed' $true
 $result = Invoke-Launcher $installed @('--modlaunch-recover-only') 'initial-install'
 Assert-Check ($result.ExitCode -eq 0) "Installed fixture setup failed: $($result.Output)"
-$shortcutPath = Join-Path $installed.Root 'SCPSL-ModLaunch.lnk'
+$shortcutPath = Join-Path $installed.Root 'SCPSL ModLaunch.lnk'
 $shell = New-Object -ComObject WScript.Shell
 try {
     $link = $shell.CreateShortcut($shortcutPath)

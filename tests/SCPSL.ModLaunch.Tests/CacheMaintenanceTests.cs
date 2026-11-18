@@ -52,7 +52,7 @@ public sealed class CacheMaintenanceTests
     }
 
     [Fact]
-    public void RetentionPinsCurrentToolsAndBoundsNamedDownloadsAndLogs()
+    public void SuccessfulPreparationDiscardsConsumedDownloadsAndBoundsLogs()
     {
         using var game = new TestGame();
         string current = new string('A', 64);
@@ -61,6 +61,11 @@ public sealed class CacheMaintenanceTests
         game.Write(".modlaunch/" + CacheLayout.AdapterDownload(current), [2]);
         game.Write(".modlaunch/" + CacheLayout.AdapterDownload(orphan), [3]);
         game.Write(".modlaunch/downloads/unfinished.part", [4]);
+        foreach (string name in new[] { "MelonLoader-0.7.3.x64.zip", "MelonLoader-0.7.3-native-bootstrap-PR13.zip",
+                     "Unity-6000.0.43-managed.zip", "Unity-6000.0.43-managed.zip.sha256", "native-bootstrap-pr13-old.zip" })
+            game.Write(".modlaunch/downloads/" + name, [8]);
+        game.Write(".modlaunch/downloads/patch-definitions/ModPatch-current/patchinfo.json", [9]);
+        game.Write(".modlaunch/downloads/unrecognized-user-file.zip", [10]);
         for (int i = 0; i < 10; i++)
         {
             string file = ".modlaunch/downloads/Cpp2IL-version-" + i + ".exe.download";
@@ -75,11 +80,13 @@ public sealed class CacheMaintenanceTests
             DotnetRoot = Path.Combine(game.Root, "host-runtime"),
             AdapterDirectory = Path.Combine(game.Root, ".modlaunch", CacheLayout.AdapterFolder(current))
         });
-        Assert.True(File.Exists(Path.Combine(game.Root, ".modlaunch", CacheLayout.AdapterDownload(current))));
+        Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch", CacheLayout.AdapterDownload(current))));
         Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch", CacheLayout.AdapterDownload(orphan))));
         Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch/downloads/unfinished.part")));
-        Assert.Equal(8, Directory.GetFiles(Path.Combine(game.Root, ".modlaunch/downloads"), "*.download").Length);
-        Assert.Equal(8, Directory.GetFiles(Path.Combine(game.Root, ".modlaunch/downloads"), "*.sha256").Length);
+        Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch/downloads"), "*.download"));
+        Assert.Empty(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch/downloads"), "*.sha256"));
+        Assert.Equal("unrecognized-user-file.zip", Path.GetFileName(Assert.Single(Directory.GetFiles(Path.Combine(game.Root, ".modlaunch/downloads")))));
+        Assert.True(File.Exists(Path.Combine(game.Root, ".modlaunch/downloads/patch-definitions/ModPatch-current/patchinfo.json")));
         Assert.Equal(20, Directory.GetFiles(Path.Combine(game.Root, ".modlaunch/logs")).Length);
     }
 }

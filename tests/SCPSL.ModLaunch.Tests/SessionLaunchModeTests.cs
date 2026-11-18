@@ -15,7 +15,7 @@ public sealed class SessionLaunchModeTests
         var prepared = Prepare(game, skipMelonLoader);
         var transaction = new SessionTransaction(game.Root);
         var journal = transaction.Create(prepared);
-        Assert.Equal(skipMelonLoader ? 4 : 3, journal.SchemaVersion);
+        Assert.Equal(skipMelonLoader ? 6 : 5, journal.SchemaVersion);
         transaction.Activate(journal);
         // Generated runtime files and user configuration can change during a retained session.
         game.Write("MelonLoader/Il2CppAssemblies/Generated.dll", [4, 5, 6]);
@@ -270,6 +270,7 @@ public sealed class SessionLaunchModeTests
         using var game = new TestGame();
         var transaction = new SessionTransaction(game.Root);
         var journal = transaction.Create(Prepare(game, false));
+        AddLegacyObservedBackups(game, journal, 3);
         transaction.Activate(journal);
         string journalPath = Path.Combine(game.Root, ".modlaunch", "session.json");
         var json = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(journalPath)));
@@ -284,6 +285,40 @@ public sealed class SessionLaunchModeTests
         Assert.Equal("", pending.DotnetRoot);
         recovery.VerifyActive(pending);
         AssertRestored(game, recovery.Restore(pending));
+    }
+
+    [Theory]
+    [InlineData(3, false)]
+    [InlineData(4, true)]
+    public void OlderRetainedSessionsStillVerifyTheirObservedBackupsBeforeRecovery(int schema, bool skipMelonLoader)
+    {
+        using var game = new TestGame();
+        var transaction = new SessionTransaction(game.Root);
+        var journal = transaction.Create(Prepare(game, skipMelonLoader));
+        AddLegacyObservedBackups(game, journal, schema);
+        transaction.Activate(journal);
+        var recovery = new SessionTransaction(game.Root);
+        var pending = Assert.IsType<SessionJournal>(recovery.LoadPending());
+        Assert.Equal(schema, pending.SchemaVersion);
+        recovery.VerifyActive(pending);
+        var observed = pending.Entries.Single(entry => entry.RelativePath == "UnityPlayer.dll");
+        string backup = Path.Combine(game.Root, ".modlaunch", observed.BackupPath!);
+        File.Delete(backup);
+        Assert.Throws<InvalidDataException>(() => recovery.VerifyActive(pending));
+        AssertRestored(game, recovery.Restore(pending));
+        Assert.All(pending.Entries.Where(entry => entry.BackupPath != null),
+            entry => Assert.False(File.Exists(Path.Combine(game.Root, ".modlaunch", entry.BackupPath!))));
+    }
+
+    private static void AddLegacyObservedBackups(TestGame game, SessionJournal journal, int schema)
+    {
+        journal.SchemaVersion = schema;
+        foreach (var entry in journal.Entries.Where(entry => entry.OriginalHash != null && entry.BackupPath == null))
+        {
+            entry.BackupPath = CacheLayout.OriginalFile(entry.RelativePath, entry.OriginalHash!);
+            FileOps.CopyVerified(Path.Combine(game.Root, entry.RelativePath), Path.Combine(game.Root, ".modlaunch", entry.BackupPath), entry.OriginalHash!);
+        }
+        FileOps.WriteJson(Path.Combine(game.Root, ".modlaunch", "session.json"), journal);
     }
 
     private static PreparedSession Prepare(TestGame game, bool skipMelonLoader)

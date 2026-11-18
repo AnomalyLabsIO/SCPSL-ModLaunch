@@ -36,6 +36,16 @@ public static class RuntimeInstallation
         foreach (string folder in new[] { "Mods", "Plugins", "UserData", "UserLibs" }) Directory.CreateDirectory(FileOps.SafePath(root, folder));
     }
 
+    public static void DisableGeneratorRemoteLookup(string root, Action<string>? log = null)
+    {
+        // Preparations and retained sessions created by older launchers still own the stock DLL.
+        string relativePath = MelonGeneratorStartup.RelativePath;
+        if (!ReadOwnership(root).OwnedPaths.Contains(relativePath, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidDataException("The MelonLoader assembly generator is not owned by ModLaunch. Run ModLaunch Repair.");
+        if (MelonGeneratorStartup.DisableRemoteLookup(RuntimePath(root, relativePath)))
+            log?.Invoke("Disabled the MelonLoader assembly generator's startup metadata lookup.");
+    }
+
     public static void InstallFromStage(string root, string stage, IReadOnlyList<PreparedFile> files, string fingerprint, Action<string>? log = null)
     {
         string marker = FileOps.SafePath(root, ".modlaunch/runtime-owner.json");
@@ -106,7 +116,14 @@ public static class RuntimeInstallation
         {
             string path = RuntimePath(root, file.RelativePath);
             if (!seen.Add(file.RelativePath) || !owned.Contains(file.RelativePath) || !IsHash(file.Sha256) || !File.Exists(path)) return false;
-            if (!IsMutable(file.RelativePath) && !(verification?.Matches(path, file.Sha256) ?? FileOps.HashEquals(FileOps.Hash(path), file.Sha256))) return false;
+            if (IsMutable(file.RelativePath)) continue;
+            string actual = verification?.Hash(path) ?? FileOps.Hash(path);
+            if (FileOps.HashEquals(actual, file.Sha256)) continue;
+            // Older manifests pin the stock generator. Accept the exact patched file
+            // so the one-file migration can happen without regenerating assemblies.
+            if (!file.RelativePath.Equals(MelonGeneratorStartup.RelativePath, StringComparison.OrdinalIgnoreCase) ||
+                !FileOps.HashEquals(file.Sha256, MelonGeneratorStartup.StockHash) || actual != MelonGeneratorStartup.PatchedHash)
+                return false;
         }
         foreach (string required in new[] { "MelonLoader/net6/MelonLoader.dll", "MelonLoader/net6/Il2CppInterop.Runtime.dll", "MelonLoader/net6/MelonLoader.runtimeconfig.json", "MelonLoader/net6/MelonLoader.deps.json" })
             if (!seen.Contains(required)) return false;

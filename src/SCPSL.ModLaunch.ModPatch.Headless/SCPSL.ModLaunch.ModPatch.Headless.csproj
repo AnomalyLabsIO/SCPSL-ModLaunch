@@ -11,5 +11,7 @@
   <ItemGroup>
     <Content Include="../../vendor/ModPatch/*.txt" Link="ThirdParty/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../vendor/ModPatch/PROVENANCE.md" Link="ThirdParty/ModPatch-PROVENANCE.md" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="../../vendor/Il2CppInterop/Il2CppInterop.Generator.dll" LogicalName="SCPSL.ModLaunch.Il2CppInterop.Generator.dll" />
+    <Content Include="../../vendor/Il2CppInterop/*" Exclude="../../vendor/Il2CppInterop/*.dll" Link="ThirdParty/Il2CppInterop/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -12,6 +12,8 @@ public sealed class PreparationService
     private const string ModPatchRepository = ModPatchBundle.Repository;
     private const string MelonVersion = "0.7.3";
     private const string MelonHash = "5B2B2F3D1CD42B59EC886C5BDC2663EDAE87A0097A4F4A8F58C0965A99DDA416";
+    // version.dll inside the checksum-pinned official MelonLoader 0.7.3 x64 archive.
+    private const string StockBootstrapHash = "0CE7A4E530C7F83F172A2C44AED45EEDB3BDCF06B83760F143A0FBA6885FA929";
     private const string AdapterAsset = "SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip";
     private readonly Action<string> _log;
     private readonly HttpClient _http;
@@ -36,7 +38,7 @@ public sealed class PreparationService
     }
 
     public async Task<PreparedSession> PrepareAsync(string gameDirectory, string cacheDirectory, ModLaunchSettings settings, CancellationToken ct,
-        FileVerificationCache? verification = null, bool skipMelonLoader = false)
+        FileVerificationCache? verification = null, bool skipMelonLoader = false, bool forceRebuild = false)
     {
         if (!skipMelonLoader && settings.MelonLoaderVersion != MelonVersion)
             throw new InvalidOperationException($"This launcher build targets MelonLoader {MelonVersion}. Update the melonLoaderVersion setting to match.");
@@ -74,7 +76,7 @@ public sealed class PreparationService
             _log($"Update check is unavailable: {ex.Message}");
             PreparedSession? offline;
             using (StartupPhase.Start(_log, "offline prepared-session validation"))
-                offline = FindOfflineSession(cacheDirectory, inputKey, settings, verification, skipMelonLoader: skipMelonLoader);
+                offline = forceRebuild ? null : FindOfflineSession(cacheDirectory, inputKey, settings, verification, skipMelonLoader: skipMelonLoader);
             if (offline is null)
                 throw new IOException("The update service is unavailable and no complete, validated preparation exists for these exact game files. Connect to the internet and retry.", ex);
             offline.DotnetRoot = hostRuntime.DotnetRoot;
@@ -84,7 +86,7 @@ public sealed class PreparationService
         string adapterHash;
         using (StartupPhase.Start(_log, "adapter fingerprinting"))
             adapterHash = HashTree(Path.GetDirectoryName(adapter)!, verification);
-        if (resources.UnavailableOnline)
+        if (resources.UnavailableOnline && !forceRebuild)
         {
             // An outage must not switch an already prepared session from a newer
             // remote resource revision back to the bundled revision and regenerate it.
@@ -106,7 +108,7 @@ public sealed class PreparationService
             {
                 try
                 {
-                    if (File.Exists(manifestPath))
+                    if (File.Exists(manifestPath) && !forceRebuild)
                     {
                         var manifest = ReadManifest(manifestPath);
                         manifest.Session.DotnetRoot = hostRuntime.DotnetRoot;
@@ -190,6 +192,7 @@ public sealed class PreparationService
         {
             using (StartupPhase.Start(_log, "persistent runtime installation"))
             {
+                MelonGeneratorStartup.DisableRemoteLookup(ArtifactCache.SafePath(stage, MelonGeneratorStartup.RelativePath));
                 foreach (var path in Directory.EnumerateFiles(Path.Combine(stage, "MelonLoader"), "*", SearchOption.AllDirectories))
                 {
                     var relative = Relative(stage, path);
@@ -292,8 +295,13 @@ public sealed class PreparationService
                 (tokens.Length == 2 && tokens[1].TrimStart('*') != AdapterAsset)) throw new InvalidDataException("Invalid adapter checksum sidecar.");
             digest = tokens[0];
         }
-        var zip = await _artifacts.DownloadAsync(url, ArtifactCache.SafePath(cacheDirectory, CacheLayout.AdapterDownload(digest!)), digest!, false, ct);
-        var directory = ArtifactCache.ExtractVerified(zip, ArtifactCache.SafePath(cacheDirectory, CacheLayout.AdapterFolder(digest!)));
+        var zip = ArtifactCache.SafePath(cacheDirectory, CacheLayout.AdapterDownload(digest!));
+        var directory = ArtifactCache.SafePath(cacheDirectory, CacheLayout.AdapterFolder(digest!));
+        if (!ArtifactCache.IsVerifiedExtraction(directory, digest!))
+        {
+            await _artifacts.DownloadAsync(url, zip, digest!, false, ct);
+            ArtifactCache.ExtractVerified(zip, directory);
+        }
         var adapter = ArtifactCache.SafePath(directory, "SCPSL-ModLaunch.ModPatch.Headless.exe");
         if (!File.Exists(adapter)) throw new InvalidDataException("The companion archive is missing SCPSL-ModLaunch.ModPatch.Headless.exe.");
         string engineRoot = Path.Combine(directory, "ModPatch");
@@ -309,6 +317,9 @@ public sealed class PreparationService
             return bundled;
         }
         _ = ModPatchBundle.Read(engineRoot);
+        try { File.Delete(zip); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { _log($"Consumed adapter download cleanup deferred: {ex.Message}"); }
         return adapter;
     }
 
@@ -373,10 +384,23 @@ public sealed class PreparationService
             throw new InvalidOperationException($"The selected Windows x64 .NET runtime could not enumerate Microsoft.NETCore.App {runtime.Version}.");
     }
 
-    private static List<FileIdentity> CaptureInputs(string gameDirectory, FileVerificationCache? verification)
+    private static readonly string[] InputPaths = ["SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll",
+        "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", "SL-AC.dll", "SCPSL_Data/globalgamemanagers"];
+
+    internal static void CheckInputFiles(string gameDirectory)
+    {
+        foreach (string relative in InputPaths)
+        {
+            string path = ArtifactCache.SafePath(gameDirectory, relative);
+            if (!File.Exists(path) && relative is not "SL-AC.dll")
+                throw new FileNotFoundException($"Required game file is missing: {relative}", path);
+        }
+    }
+
+    internal static List<FileIdentity> CaptureInputs(string gameDirectory, FileVerificationCache? verification)
     {
         var inputs = new List<FileIdentity>();
-        foreach (var relative in new[] { "SCPSL.exe", "GameAssembly.dll", "UnityPlayer.dll", "SCPSL_Data/il2cpp_data/Metadata/global-metadata.dat", "SL-AC.dll", "SCPSL_Data/globalgamemanagers" })
+        foreach (string relative in InputPaths)
         {
             var path = ArtifactCache.SafePath(gameDirectory, relative);
             bool exists = File.Exists(path);
@@ -402,6 +426,8 @@ public sealed class PreparationService
             var relative = file.RelativePath.Replace('\\', '/');
             if (relative.Equals(SessionTransaction.RuntimeMetadataPath, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("The adapter reported runtime metadata as an output. Parser-normalized metadata must never be published.");
+            if (relative.Equals(GameFileContract.BootConfigPath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("An adapter cannot replace the boot configuration.");
             if (!paths.Add(relative) || !ArtifactCache.IsHash(file.Sha256) || !ArtifactCache.Matches(ArtifactCache.SafePath(stage, relative), file.Sha256))
                 throw new InvalidDataException($"The adapter output is duplicate, absent or invalid: {relative}");
             if (relative.StartsWith("Mods/", StringComparison.OrdinalIgnoreCase) || relative.StartsWith("Plugins/", StringComparison.OrdinalIgnoreCase) ||
@@ -445,10 +471,12 @@ public sealed class PreparationService
     }
 
     internal static bool ValidateSession(PreparedSession session, string preparedDirectory, string cacheDirectory, string inputKey,
-        string expectedMelonHash = MelonHash, FileVerificationCache? verification = null)
+        string expectedMelonHash = MelonHash, FileVerificationCache? verification = null, string? expectedStockBootstrapHash = null)
     {
+        var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         if (session.LayoutVersion != 3 || !ArtifactCache.IsHash(session.Fingerprint) ||
-            preparedDirectory != ArtifactCache.SafePath(cacheDirectory, CacheLayout.ModdedFiles) || session.PreparedDirectory != preparedDirectory ||
+            !string.Equals(preparedDirectory, ArtifactCache.SafePath(cacheDirectory, CacheLayout.ModdedFiles), pathComparison) ||
+            !string.Equals(session.PreparedDirectory, preparedDirectory, pathComparison) ||
             session.Files is null || session.Inputs is null || session.RuntimeFiles is null || session.Files.Count == 0 ||
             ComputeHash(JsonSerializer.Serialize(session.Inputs, JsonDefaults.Options)) != inputKey) return false;
         if (session.SkipMelonLoader)
@@ -457,9 +485,22 @@ public sealed class PreparationService
                 !string.IsNullOrEmpty(session.BootstrapArchive) || !string.IsNullOrEmpty(session.BootstrapArchiveSha256) || session.RuntimeFiles.Count != 0)
                 return false;
         }
-        else if (session.MelonLoaderArchive != ArtifactCache.SafePath(cacheDirectory, $"downloads/MelonLoader-{MelonVersion}.x64.zip") ||
-            !ArtifactCache.IsHash(session.BootstrapHash) || !Matches(session.MelonLoaderArchive, expectedMelonHash, verification) ||
-            !FileOps.HashEquals(ArtifactCache.BootstrapHash(session.MelonLoaderArchive), session.BootstrapHash)) return false;
+        else
+        {
+            if (!string.Equals(session.MelonLoaderArchive, ArtifactCache.SafePath(cacheDirectory, $"downloads/MelonLoader-{MelonVersion}.x64.zip"), pathComparison) ||
+                !ArtifactCache.IsHash(session.BootstrapHash)) return false;
+            // The installed runtime and prepared payloads remain the durable cache. Old manifests
+            // retain the consumed download's path; the known stock bootstrap pin replaces ZIP I/O.
+            if (expectedStockBootstrapHash is null && expectedMelonHash == MelonHash)
+                expectedStockBootstrapHash = StockBootstrapHash;
+            // Synthetic archives used by callers exercising validation retain their explicit pin.
+            if (expectedStockBootstrapHash is null)
+            {
+                if (!Matches(session.MelonLoaderArchive, expectedMelonHash, verification)) return false;
+                expectedStockBootstrapHash = ArtifactCache.BootstrapHash(session.MelonLoaderArchive);
+            }
+            if (!FileOps.HashEquals(session.BootstrapHash, expectedStockBootstrapHash)) return false;
+        }
         _ = HostRuntime.ResolveFromRoot(session.DotnetRoot);
         var outputPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var sourcePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -470,7 +511,8 @@ public sealed class PreparationService
                 !Matches(ArtifactCache.SafePath(session.PreparedDirectory, file.SourcePath), file.Sha256, verification)) return false;
             string logical = file.RelativePath.Replace('\\', '/');
             _ = ArtifactCache.SafePath(preparedDirectory, logical);
-            if (logical.Equals(SessionTransaction.RuntimeMetadataPath, StringComparison.OrdinalIgnoreCase)) return false;
+            if (logical.Equals(SessionTransaction.RuntimeMetadataPath, StringComparison.OrdinalIgnoreCase) ||
+                logical.Equals(GameFileContract.BootConfigPath, StringComparison.OrdinalIgnoreCase)) return false;
             if (logical.Equals("version.dll", StringComparison.OrdinalIgnoreCase) || logical.Equals("SL-AC.dll", StringComparison.OrdinalIgnoreCase) ||
                 new[] { "MelonLoader/", "Mods/", "Plugins/", "UserData/", "UserLibs/", ".modlaunch/" }
                     .Any(prefix => logical.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))) return false;

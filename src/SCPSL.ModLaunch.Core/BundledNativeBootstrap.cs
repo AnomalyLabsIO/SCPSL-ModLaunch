@@ -40,14 +40,10 @@ public static class BundledNativeBootstrap
         byte[] contents = bytes.ToArray();
         ValidateArchive(contents, expectedDllHash, expectedDllLength);
         string archiveHash = Convert.ToHexString(SHA256.HashData(contents));
-        string archivePath = FileOps.SafePath(cache, "downloads/MelonLoader-0.7.3-native-bootstrap-PR13.zip");
-        string previous = FileOps.SafePath(cache, $"downloads/native-bootstrap-pr13-{archiveHash}.zip");
-        if (!File.Exists(archivePath) && File.Exists(previous) && FileOps.HashEquals(FileOps.Hash(previous), archiveHash)) File.Move(previous, archivePath);
-        if (!File.Exists(archivePath) || !FileOps.HashEquals(FileOps.Hash(archivePath), archiveHash))
-            FileOps.WriteBytes(archivePath, contents);
-        if (!FileOps.HashEquals(FileOps.Hash(archivePath), archiveHash))
-            throw new InvalidDataException("The cached bundled native bootstrap archive failed verification.");
-        prepared.BootstrapArchive = archivePath;
+        // Keep the compressed payload only for this launch. The executable already owns a
+        // verified copy; session activation stages its DLL under a neutral filename.
+        prepared.BootstrapArchiveContents = contents;
+        prepared.BootstrapArchive = null;
         prepared.BootstrapArchiveSha256 = archiveHash;
         prepared.BootstrapHash = expectedDllHash;
         log?.Invoke($"Using the bundled MelonLoader 0.7.3 native bootstrap with Dobby PR #13 (SHA-256 {expectedDllHash}).");

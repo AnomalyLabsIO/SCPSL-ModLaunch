@@ -6,18 +6,69 @@ using Tomlet.Models;
 namespace SCPSL.ModLaunch.Core;
 
 public sealed record LaunchArguments(bool RecoverOnly, string[] GameArguments,
-    bool NoRestore = false, bool NoMelonLoader = false, bool NoStart = false);
+    bool NoRestore = false, bool NoMelonLoader = false, bool NoStart = false,
+    bool Repair = false, bool Launch = false);
+
+public enum LauncherMode { Gui, Cli }
+
+public static class LauncherEntryPoint
+{
+    public static LauncherMode ResolveMode(string[] args)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        if (args.Length == 0) return LauncherMode.Gui;
+        // A literal game argument after -- must not select the launcher's interface.
+        bool gui = args.TakeWhile(argument => argument != "--").Contains("--modlaunch-gui", StringComparer.Ordinal);
+        if (!gui) return LauncherMode.Cli;
+        if (args.Length != 1)
+            throw new ArgumentException("--modlaunch-gui cannot be combined with CLI options or game arguments.");
+        return LauncherMode.Gui;
+    }
+}
+
+public enum GuiLaunchAction { Launch, Prepare, Repair, Restore }
+
+public static class GuiLaunchActions
+{
+    /// <summary>Runs the selected action through the CLI after the GUI releases its directory lock.</summary>
+    public static string[] ArgumentsFor(GuiLaunchAction action, bool restoreVanillaOnExit = true)
+    {
+        string[] arguments = action switch
+        {
+            GuiLaunchAction.Launch => ["--modlaunch-cli", "--modlaunch-launch"],
+            // --launch continues after restoring an earlier session; --no-start stops before game launch.
+            GuiLaunchAction.Prepare => ["--modlaunch-cli", "--modlaunch-launch", "--modlaunch-no-start"],
+            GuiLaunchAction.Repair => ["--modlaunch-cli", "--modlaunch-launch", "--modlaunch-repair", "--modlaunch-no-start"],
+            GuiLaunchAction.Restore => ["--modlaunch-cli", "--modlaunch-recover-only"],
+            _ => throw new ArgumentOutOfRangeException(nameof(action), action, "Unknown launcher action.")
+        };
+        return !restoreVanillaOnExit && action != GuiLaunchAction.Restore
+            ? [.. arguments, "--modlaunch-no-restore"] : arguments;
+    }
+}
 
 public static class GameArguments
 {
     public static LaunchArguments Parse(string[] args)
     {
+        _ = LauncherEntryPoint.ResolveMode(args);
         var forwarded = new List<string>();
-        bool recover = false, noRestore = false, noMelonLoader = false, noStart = false;
+        bool recover = false, noRestore = false, noMelonLoader = false, noStart = false, repair = false, launch = false;
+        bool launcherModeOptions = true;
         foreach (string arg in args)
         {
+            if (arg == "--")
+            {
+                launcherModeOptions = false;
+                forwarded.Add(arg);
+                continue;
+            }
             switch (arg)
             {
+                case "--modlaunch-cli" when launcherModeOptions: break;
+                case "--modlaunch-gui" when launcherModeOptions: break;
+                case "--modlaunch-repair" when launcherModeOptions: repair = true; break;
+                case "--modlaunch-launch" when launcherModeOptions: launch = true; break;
                 case "--modlaunch-recover-only": recover = true; break;
                 case "--modlaunch-no-restore": noRestore = true; break;
                 case "--modlaunch-no-melonloader": noMelonLoader = true; break;
@@ -25,9 +76,9 @@ public static class GameArguments
                 default: forwarded.Add(arg); break;
             }
         }
-        if (recover && (noRestore || noMelonLoader || noStart || forwarded.Count != 0))
+        if (recover && (noRestore || noMelonLoader || noStart || repair || launch || forwarded.Count != 0))
             throw new ArgumentException("--modlaunch-recover-only cannot be combined with other launcher options or game arguments.");
-        return new LaunchArguments(recover, forwarded.ToArray(), noRestore, noMelonLoader, noStart);
+        return new LaunchArguments(recover, forwarded.ToArray(), noRestore, noMelonLoader, noStart, repair, launch);
     }
 
     public static ProcessStartInfo StartInfo(string gameDirectory, string dotnetRoot, IEnumerable<string> args)
