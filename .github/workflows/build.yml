@@ -68,13 +68,8 @@ jobs:
           $assets = @(
             'SCPSL-ModLaunch.exe',
             'SCPSL-ModLaunch.exe.sha256',
-            'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip',
-            'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip.sha256',
             'SCPSL-ModLaunch-win-x64.zip',
             'SCPSL-ModLaunch-win-x64.zip.sha256'
           ) | ForEach-Object { Join-Path 'release' $_ }
-          $sources = @(Get-ChildItem -LiteralPath 'release' -Filter 'SCPSL.ModPatch.sources.*.zip' -File)
-          if ($sources.Count -ne 1) { throw 'Expected one matching ModPatch source archive.' }
-          $assets += $sources[0].FullName, ($sources[0].FullName + '.sha256')
           gh release upload $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY
           if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed.' }

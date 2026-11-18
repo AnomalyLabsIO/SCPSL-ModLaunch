@@ -88,7 +88,6 @@ try {
     $modPatchVendor = Join-Path $projectRoot 'vendor/ModPatch'
     $modPatchPackage = Get-ModPatchPackage -Directory $modPatchVendor
     $modPatchArchive = $modPatchPackage.ArchivePath
-    $modPatchSources = $modPatchPackage.SourcePath
     $modPatchStage = Join-Path $adapterStage 'ModPatch'
     [IO.Compression.ZipFile]::ExtractToDirectory($modPatchArchive,$modPatchStage)
     $uniqueBundle = Join-Path $stageRoot 'adapter-bundled.zip'
@@ -129,13 +128,8 @@ try {
         if ($actualVersion -ne $expectedVersion) { throw "Published EXE version $actualVersion does not match $ReleaseVersion." }
     }
     Copy-Item -LiteralPath $launcherExe -Destination $releaseStage -Force
-    $adapterName = 'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip'
-    Copy-Item -LiteralPath $bundlePath -Destination (Join-Path $releaseStage $adapterName) -Force
-    Copy-Item -LiteralPath $modPatchSources,($modPatchSources+'.sha256') -Destination $releaseStage -Force
-    foreach ($name in @('SCPSL-ModLaunch.exe', $adapterName)) {
-        $digest = (Get-FileHash -LiteralPath (Join-Path $releaseStage $name) -Algorithm SHA256).Hash.ToLowerInvariant()
-        [IO.File]::WriteAllText((Join-Path $releaseStage ($name + '.sha256')), "$digest  $name`n", [Text.UTF8Encoding]::new($false))
-    }
+    $launcherHash = (Get-FileHash -LiteralPath $launcherExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText((Join-Path $releaseStage 'SCPSL-ModLaunch.exe.sha256'), "$launcherHash  SCPSL-ModLaunch.exe`n", [Text.UTF8Encoding]::new($false))
     foreach ($name in @('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $releaseStage -Force
     }
@@ -161,12 +155,12 @@ try {
     Copy-Item -LiteralPath $distribution -Destination $releaseStage
     $distributionHash = (Get-FileHash -LiteralPath $distribution -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $releaseStage ($distributionName + '.sha256')), "$distributionHash  $distributionName`n", [Text.UTF8Encoding]::new($false))
-    # Hash-named snapshots change on refresh; expose only the source matching this release.
+    # Remove standalone companion and source files left by older packaging runs.
     Get-ChildItem -LiteralPath $releaseRoot -File | Where-Object {
         $_.Name -like 'SCPSL-ModPatch.Cli-*.zip*' -or
-        ($_.Name -like 'SCPSL.ModPatch.sources.*.zip*' -and
-            $_.Name -ne [IO.Path]::GetFileName($modPatchSources) -and
-            $_.Name -ne ([IO.Path]::GetFileName($modPatchSources) + '.sha256'))
+        $_.Name -in @('SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip', 'SCPSL-ModLaunch.ModPatch.Headless-win-x64.zip.sha256') -or
+        $_.Name -like 'SCPSL.ModPatch.sources.*.zip' -or
+        $_.Name -like 'SCPSL.ModPatch.sources.*.zip.sha256'
     } | Remove-Item -Force
     Get-ChildItem -LiteralPath $releaseStage | Copy-Item -Destination $releaseRoot -Recurse -Force
     Write-Host "Release artifacts: $releaseRoot"
