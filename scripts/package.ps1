@@ -148,9 +148,12 @@ try {
     # Use the verified package's notices so dependency updates cannot retain stale vendor copies.
     Copy-Item -LiteralPath (Join-Path $modPatchStage 'licenses') -Destination (Join-Path $releaseNotices 'ModPatch') -Recurse
     Copy-Item -LiteralPath (Join-Path $projectRoot 'vendor/ModPatch/PROVENANCE.md') -Destination (Join-Path $releaseNotices 'ModPatch-PROVENANCE.md') -Force
-    $releaseDocs = Join-Path $releaseStage 'docs'
-    New-Item -ItemType Directory -Path $releaseDocs -Force | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'docs') -Filter '*.md' -File | Copy-Item -Destination $releaseDocs -Force
+    $docsPath = Join-Path $projectRoot 'docs'
+    if (Test-Path -LiteralPath $docsPath -PathType Container) {
+        $releaseDocs = Join-Path $releaseStage 'docs'
+        New-Item -ItemType Directory -Path $releaseDocs -Force | Out-Null
+        Get-ChildItem -LiteralPath $docsPath -Filter '*.md' -File | Copy-Item -Destination $releaseDocs -Force
+    }
     # The full download includes documentation and notices; updates use the separate EXE.
     $distributionName = 'SCPSL-ModLaunch-win-x64.zip'
     $distribution = Join-Path $stageRoot $distributionName
